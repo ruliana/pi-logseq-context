@@ -1,0 +1,12 @@
+{
+  "name": "logseq-context",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "pi": {
+    "extensions": ["./index.ts"]
+  },
+  "scripts": {
+    "test": "npx tsx --test context.test.ts"
+  }
+}
