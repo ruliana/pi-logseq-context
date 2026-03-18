@@ -13,8 +13,8 @@
 import { existsSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { complete, type Message } from "@mariozechner/pi-ai";
-import type { ExtensionAPI, SessionEntry } from "@mariozechner/pi-coding-agent";
-import { BorderedLoader, DynamicBorder, convertToLlm, serializeConversation } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, SessionEntry } from "@mariozechner/pi-coding-agent";
+import { DynamicBorder, convertToLlm, serializeConversation } from "@mariozechner/pi-coding-agent";
 import { Container, type SelectItem, SelectList, Text } from "@mariozechner/pi-tui";
 
 import {
@@ -33,6 +33,116 @@ import {
 	type ContextPageParams,
 	type LoadedContextState,
 } from "./context.ts";
+
+interface SaveParams {
+	conversationText: string;
+	availablePages: string[];
+	isUpdate: boolean;
+	extraGoal: string | undefined;
+	snapshot: LoadedContextState | null;
+	model: Parameters<typeof complete>[0];
+	apiKey: string;
+}
+
+async function saveInBackground(
+	ctx: ExtensionCommandContext,
+	params: SaveParams,
+): Promise<void> {
+	const { conversationText, availablePages, isUpdate, extraGoal, snapshot, model, apiKey } = params;
+
+	try {
+		// LLM extraction
+		const userPrompt = buildExtractionPrompt(conversationText, {
+			extraGoal,
+			existingTitle: isUpdate ? snapshot!.title : undefined,
+			availablePages,
+		});
+
+		const userMessage: Message = {
+			role: "user",
+			content: [{ type: "text", text: userPrompt }],
+			timestamp: Date.now(),
+		};
+
+		const response = await complete(
+			model,
+			{ systemPrompt: EXTRACT_SYSTEM_PROMPT, messages: [userMessage] },
+			{ apiKey },
+		);
+
+		if (response.stopReason === "aborted") {
+			ctx.ui.setStatus("save-context", undefined);
+			ctx.ui.notify("Context save aborted", "info");
+			return;
+		}
+
+		const text = response.content
+			.filter((c): c is { type: "text"; text: string } => c.type === "text")
+			.map((c) => c.text)
+			.join("\n")
+			.trim();
+
+		const extracted = extractJSON(text);
+		if (!extracted) {
+			ctx.ui.setStatus("save-context", undefined);
+			ctx.ui.notify("Context extraction failed: could not parse LLM response", "error");
+			return;
+		}
+
+		// Build page content
+		let pageContent: string;
+		let targetPath: string;
+
+		if (isUpdate && snapshot) {
+			let createdDate: string | undefined;
+			try {
+				const existing = readFileSync(snapshot.filePath, "utf-8");
+				createdDate = extractCreatedDate(existing) ?? undefined;
+			} catch {
+				// File might have been deleted
+			}
+			pageContent = buildContextPage(extracted, {
+				createdDate,
+				updatedDate: journalRef(new Date()),
+			});
+			targetPath = snapshot.filePath;
+		} else {
+			pageContent = buildContextPage(extracted);
+			targetPath = contextPagePath(extracted.title);
+		}
+
+		// Write context page
+		writeFileSync(targetPath, pageContent, "utf-8");
+
+		// Upsert journal entry
+		const today = new Date();
+		const jPath = journalPath(today);
+		const title = isUpdate ? snapshot!.title : extracted.title;
+		const existingJournal = existsSync(jPath) ? readFileSync(jPath, "utf-8") : "";
+		const updatedJournal = upsertJournalEntry(existingJournal, title);
+		writeFileSync(jPath, updatedJournal, "utf-8");
+
+		// Run logseq-lint
+		const linter = `${process.env.HOME}/.local/bin/logseq-lint.js`;
+		for (const fp of [targetPath, jPath]) {
+			try {
+				execSync(`bun ${linter} --fix --root ${LOGSEQ_DIR} ${fp}`, {
+					encoding: "utf-8",
+					timeout: 10_000,
+				});
+			} catch {
+				// Lint errors are non-fatal
+			}
+		}
+
+		const verb = isUpdate ? "updated" : "saved";
+		ctx.ui.setStatus("save-context", undefined);
+		ctx.ui.notify(`Context ${verb}: ${targetPath}`, "success");
+	} catch (err) {
+		ctx.ui.setStatus("save-context", undefined);
+		ctx.ui.notify(`Context save failed: ${err}`, "error");
+	}
+}
 
 export default function (pi: ExtensionAPI) {
 	/** Tracks which context was loaded via /load-context in this session. */
@@ -53,7 +163,8 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			// Gather conversation from current branch
+			// ── Synchronous capture (must happen before returning) ────
+
 			const branch = ctx.sessionManager.getBranch();
 			const messages = branch
 				.filter((entry): entry is SessionEntry & { type: "message" } => entry.type === "message")
@@ -64,11 +175,9 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			// Serialize conversation for the LLM
 			const llmMessages = convertToLlm(messages);
 			const conversationText = serializeConversation(llmMessages);
 
-			// Scan available logseq pages for [[linking]]
 			const pagesDir = `${LOGSEQ_DIR}/pages`;
 			let availablePages: string[] = [];
 			try {
@@ -78,114 +187,32 @@ export default function (pi: ExtensionAPI) {
 				// Non-fatal — extraction works without page list
 			}
 
-			// Determine if we're updating an existing context
 			const isUpdate = loadedContext !== null;
 			const extraGoal = args?.trim() || undefined;
+			const model = ctx.model;
+			const apiKey = await ctx.modelRegistry.getApiKey(model);
 
-			// Extract context via LLM with loader UI
-			const loaderLabel = isUpdate
-				? `Updating context: ${loadedContext!.title}...`
-				: "Extracting context...";
+			// Snapshot loadedContext before going async
+			const snapshot = isUpdate ? { ...loadedContext! } : null;
 
-			const extracted = await ctx.ui.custom<ContextPageParams | null>((tui, theme, _kb, done) => {
-				const loader = new BorderedLoader(tui, theme, loaderLabel);
-				loader.onAbort = () => done(null);
+			// ── Background save (non-blocking) ───────────────────────
 
-				const doExtract = async () => {
-					const apiKey = await ctx.modelRegistry.getApiKey(ctx.model!);
+			const statusLabel = isUpdate
+				? `💾 Updating: ${snapshot!.title}`
+				: "💾 Saving context…";
+			ctx.ui.setStatus("save-context", statusLabel);
 
-					const userPrompt = buildExtractionPrompt(conversationText, {
-						extraGoal,
-						existingTitle: isUpdate ? loadedContext!.title : undefined,
-						availablePages,
-					});
+			saveInBackground(ctx, {
+				conversationText,
+				availablePages,
+				isUpdate,
+				extraGoal,
+				snapshot,
+				model,
+				apiKey,
+			}).catch(() => {});
 
-					const userMessage: Message = {
-						role: "user",
-						content: [{ type: "text", text: userPrompt }],
-						timestamp: Date.now(),
-					};
-
-					const response = await complete(
-						ctx.model!,
-						{ systemPrompt: EXTRACT_SYSTEM_PROMPT, messages: [userMessage] },
-						{ apiKey, signal: loader.signal },
-					);
-
-					if (response.stopReason === "aborted") return null;
-
-					const text = response.content
-						.filter((c): c is { type: "text"; text: string } => c.type === "text")
-						.map((c) => c.text)
-						.join("\n")
-						.trim();
-
-					return extractJSON(text);
-				};
-
-				doExtract()
-					.then(done)
-					.catch((err) => {
-						console.error("Context extraction failed:", err);
-						done(null);
-					});
-
-				return loader;
-			});
-
-			if (!extracted) {
-				ctx.ui.notify("Cancelled", "info");
-				return;
-			}
-
-			// Build page content — preserve original created date on updates
-			let pageContent: string;
-			let targetPath: string;
-
-			if (isUpdate) {
-				let createdDate: string | undefined;
-				try {
-					const existing = readFileSync(loadedContext!.filePath, "utf-8");
-					createdDate = extractCreatedDate(existing) ?? undefined;
-				} catch {
-					// File might have been deleted — fall through
-				}
-				pageContent = buildContextPage(extracted, {
-					createdDate,
-					updatedDate: journalRef(new Date()),
-				});
-				targetPath = loadedContext!.filePath;
-			} else {
-				pageContent = buildContextPage(extracted);
-				targetPath = contextPagePath(extracted.title);
-			}
-
-			// Write the context page directly — no review step
-			writeFileSync(targetPath, pageContent, "utf-8");
-
-			// Upsert journal entry (deduplicates, increments counter on repeat saves)
-			const today = new Date();
-			const jPath = journalPath(today);
-			const title = isUpdate ? loadedContext!.title : extracted.title;
-			const existingJournal = existsSync(jPath) ? readFileSync(jPath, "utf-8") : "";
-			const updatedJournal = upsertJournalEntry(existingJournal, title);
-			writeFileSync(jPath, updatedJournal, "utf-8");
-
-			// Run logseq-lint --fix on both written files
-			const linter = `${process.env.HOME}/.local/bin/logseq-lint.js`;
-			for (const fp of [targetPath, jPath]) {
-				try {
-					execSync(`bun ${linter} --fix --root ${LOGSEQ_DIR} ${fp}`, {
-						encoding: "utf-8",
-						timeout: 10_000,
-					});
-				} catch {
-					// Lint errors are non-fatal for save-context
-				}
-			}
-
-			const verb = isUpdate ? "updated" : "saved";
-			ctx.ui.notify(`Context ${verb}: ${targetPath}`, "success");
+			// Returns immediately — user can keep working
 		},
 	});
 
