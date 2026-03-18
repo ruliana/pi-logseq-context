@@ -71,7 +71,7 @@ async function saveInBackground(
 		);
 
 		if (response.stopReason === "aborted") {
-			ctx.ui.setStatus("save-context", undefined);
+			ctx.ui.setWidget("save-context", undefined);
 			ctx.ui.notify("Context save aborted", "info");
 			return;
 		}
@@ -84,7 +84,7 @@ async function saveInBackground(
 
 		const extracted = extractJSON(text);
 		if (!extracted) {
-			ctx.ui.setStatus("save-context", undefined);
+			ctx.ui.setWidget("save-context", undefined);
 			ctx.ui.notify("Context extraction failed: could not parse LLM response", "error");
 			return;
 		}
@@ -136,10 +136,10 @@ async function saveInBackground(
 		}
 
 		const verb = isUpdate ? "updated" : "saved";
-		ctx.ui.setStatus("save-context", undefined);
+		ctx.ui.setWidget("save-context", undefined);
 		ctx.ui.notify(`Context ${verb}: ${targetPath}`, "success");
 	} catch (err) {
-		ctx.ui.setStatus("save-context", undefined);
+		ctx.ui.setWidget("save-context", undefined);
 		ctx.ui.notify(`Context save failed: ${err}`, "error");
 	}
 }
@@ -200,7 +200,10 @@ export default function (pi: ExtensionAPI) {
 			const statusLabel = isUpdate
 				? `💾 Updating: ${snapshot!.title}`
 				: "💾 Saving context…";
-			ctx.ui.setStatus("save-context", statusLabel);
+			ctx.ui.setWidget("save-context", (_tui, theme) => ({
+				render: () => [theme.fg("dim", statusLabel)],
+				invalidate: () => {},
+			}), { placement: "belowEditor" });
 
 			saveInBackground(ctx, {
 				conversationText,
