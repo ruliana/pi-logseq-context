@@ -340,10 +340,10 @@ Rules:
   Example: "Deployed [[SimGym]] with [[Roman]]'s review" — not "Deployed SimGym with Roman's review".
   Match page names case-sensitively. Only link pages that actually appear in the available list.
 - files: use FULL ABSOLUTE paths. Include all files relevant to the task: source code, plans, configs, scripts.
-  If a plan or design doc is mentioned, include its path (e.g., "/Users/ronie/project/plan.md"), not "the plan".
+  If a plan or design doc is mentioned, include its path (e.g., "/home/user/project/plan.md"), not "the plan".
 - When mentioning file paths in ANY text field (goal, currentState, keyDecisions, nextSteps), wrap them in backticks: \`/path/to/file.ts\`. The files array values are plain strings (no backticks) — backticks are only for paths embedded in prose.
 - references: include logseq page names AND full URLs.
-  PRs → full GitHub URL (e.g., "https://github.com/Shopify/repo/pull/42"), not "PR #42".
+  PRs → full GitHub URL (e.g., "https://github.com/acme-org/repo/pull/42"), not "PR #42".
   Dashboards, docs, external resources → full URL.
   Logseq concepts → [[page name]] for pages that exist in the graph.
 - keyDecisions: only decisions that affect future work.

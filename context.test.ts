@@ -197,9 +197,9 @@ describe("buildContextPage", () => {
 	it("renders URLs bare without [[ ]] wrapping", () => {
 		const page = buildContextPage({
 			...baseParams,
-			references: ["https://github.com/Shopify/repo/pull/42", "[[SimGym]]"],
+			references: ["https://github.com/acme-org/repo/pull/42", "[[SimGym]]"],
 		});
-		assert.ok(page.includes("\t- https://github.com/Shopify/repo/pull/42"));
+		assert.ok(page.includes("\t- https://github.com/acme-org/repo/pull/42"));
 		assert.ok(!page.includes("[[https://"));
 	});
 
