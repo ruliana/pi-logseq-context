@@ -48,7 +48,12 @@ Pi auto-discovers extensions via the `pi.extensions` field in `package.json`.
 Set `LOGSEQ_DIR` to override the default graph location (`~/logseq`):
 
 ```bash
+# Global default
 export LOGSEQ_DIR=~/my-logseq-graph
+
+# Per-session: prefix the pi command to use a specific graph
+LOGSEQ_DIR=~/work-graph pi
+LOGSEQ_DIR=~/personal-graph pi
 ```
 
 ## Requirements
