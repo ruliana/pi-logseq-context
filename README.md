@@ -43,9 +43,17 @@ ln -s /path/to/logseq-context ~/.pi/agent/extensions/logseq-context
 
 Pi auto-discovers extensions via the `pi.extensions` field in `package.json`.
 
+## Configuration
+
+Set `LOGSEQ_DIR` to override the default graph location (`~/logseq`):
+
+```bash
+export LOGSEQ_DIR=~/my-logseq-graph
+```
+
 ## Requirements
 
-- A Logseq graph at `~/logseq/` with `pages/` and `journals/` directories
+- A Logseq graph with `pages/` and `journals/` directories (defaults to `~/logseq/`)
 - Optional: `logseq-lint.js` at `~/.local/bin/logseq-lint.js` for post-save formatting
 
 ## Testing

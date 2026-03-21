@@ -3,7 +3,7 @@
  * No side effects — all I/O happens in index.ts.
  */
 
-export const LOGSEQ_DIR = `${process.env.HOME}/logseq`;
+export const LOGSEQ_DIR = process.env.LOGSEQ_DIR ?? `${process.env.HOME}/logseq`;
 export const NAMESPACE = "AI Context";
 export const NAMESPACE_SEP = "___";
 
