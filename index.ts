@@ -6,16 +6,16 @@
  *                 Also adds a journal entry referencing the context page.
  *                 If a context was loaded this session, updates it in place.
  *
- * /load-context — Show a SelectList of saved contexts, load the selected
- *                 one into the current conversation.
+ * /load-context — Show an fzf-style fuzzy finder of saved contexts (sorted
+ *                 by recency), load the selected one into the conversation.
  */
 
-import { existsSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
 import { execSync } from "node:child_process";
 import { complete, type Message } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, SessionEntry } from "@mariozechner/pi-coding-agent";
 import { DynamicBorder, convertToLlm, serializeConversation } from "@mariozechner/pi-coding-agent";
-import { Container, type SelectItem, SelectList, Text } from "@mariozechner/pi-tui";
+import { Input, fuzzyFilter, matchesKey, Key, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 
 import {
 	LOGSEQ_DIR,
@@ -33,6 +33,22 @@ import {
 	type ContextPageParams,
 	type LoadedContextState,
 } from "./context.ts";
+
+/**
+ * Format a timestamp as a relative time string (e.g. "5 min ago", "3 days ago").
+ */
+function relativeTime(mtime: Date): string {
+	const seconds = Math.floor((Date.now() - mtime.getTime()) / 1000);
+	if (seconds < 60) return "just now";
+	const minutes = Math.floor(seconds / 60);
+	if (minutes < 60) return `${minutes} min ago`;
+	const hours = Math.floor(minutes / 60);
+	if (hours < 24) return `${hours}h ago`;
+	const days = Math.floor(hours / 24);
+	if (days < 30) return `${days}d ago`;
+	const months = Math.floor(days / 30);
+	return `${months}mo ago`;
+}
 
 interface SaveParams {
 	conversationText: string;
@@ -246,39 +262,109 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			// Build SelectList items
-			const items: SelectItem[] = contexts.map((c) => ({
-				value: c.filePath,
-				label: c.title,
-				description: c.pageName,
-			}));
+			// Sort by file modification time (most recent first)
+			const withMtime = contexts.map((c) => {
+				try {
+					return { ...c, mtime: statSync(c.filePath).mtime };
+				} catch {
+					return { ...c, mtime: new Date(0) };
+				}
+			});
+			withMtime.sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
 
-			// Show fzf-style selector
+			// Show fzf-style selector with fuzzy search
 			const selected = await ctx.ui.custom<string | null>((tui, theme, _kb, done) => {
-				const container = new Container();
-				container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
-				container.addChild(new Text(theme.fg("accent", theme.bold("Load Context")), 1, 0));
+				const topBorder = new DynamicBorder((s: string) => theme.fg("accent", s));
+				const bottomBorder = new DynamicBorder((s: string) => theme.fg("accent", s));
+				const searchInput = new Input();
+				searchInput.focused = true;
 
-				const selectList = new SelectList(items, Math.min(items.length, 15), {
-					selectedPrefix: (t) => theme.fg("accent", t),
-					selectedText: (t) => theme.fg("accent", t),
-					description: (t) => theme.fg("muted", t),
-					scrollInfo: (t) => theme.fg("dim", t),
-					noMatch: (t) => theme.fg("warning", t),
-				});
+				let filtered = [...withMtime];
+				let selectedIdx = 0;
+				let lastQuery = "";
+				const maxVisible = Math.min(15, withMtime.length);
 
-				selectList.onSelect = (item) => done(item.value);
-				selectList.onCancel = () => done(null);
-				container.addChild(selectList);
-
-				container.addChild(new Text(theme.fg("dim", "↑↓ navigate • type to filter • enter select • esc cancel"), 1, 0));
-				container.addChild(new DynamicBorder((s: string) => theme.fg("accent", s)));
+				const refilter = () => {
+					const query = searchInput.getValue();
+					if (query === lastQuery) return;
+					lastQuery = query;
+					filtered = query.trim()
+						? fuzzyFilter(withMtime, query, (c) => c.title)
+						: [...withMtime];
+					selectedIdx = Math.min(selectedIdx, Math.max(0, filtered.length - 1));
+				};
 
 				return {
-					render: (w: number) => container.render(w),
-					invalidate: () => container.invalidate(),
+					// Focusable: propagate to Input for IME cursor positioning
+					get focused() { return searchInput.focused; },
+					set focused(v: boolean) { searchInput.focused = v; },
+
+					render: (w: number) => {
+						const lines: string[] = [];
+						lines.push(...topBorder.render(w));
+						lines.push(` ${theme.fg("accent", theme.bold("Load Context"))}`);
+						lines.push(...searchInput.render(w));
+						lines.push("");
+
+						if (filtered.length === 0) {
+							lines.push(theme.fg("warning", "  No matching contexts"));
+						} else {
+							const startIdx = Math.max(0, Math.min(
+								selectedIdx - Math.floor(maxVisible / 2),
+								filtered.length - maxVisible,
+							));
+							const endIdx = Math.min(startIdx + maxVisible, filtered.length);
+
+							for (let i = startIdx; i < endIdx; i++) {
+								const item = filtered[i]!;
+								const isSelected = i === selectedIdx;
+								const prefix = isSelected ? "→ " : "  ";
+								const timeStr = `  ${relativeTime(item.mtime)}`;
+								const titleMax = Math.max(1, w - visibleWidth(prefix) - visibleWidth(timeStr) - 1);
+								const title = truncateToWidth(item.title, titleMax);
+								const gap = " ".repeat(Math.max(1, w - visibleWidth(prefix) - visibleWidth(title) - visibleWidth(timeStr)));
+
+								if (isSelected) {
+									lines.push(theme.fg("accent", `${prefix}${title}${gap}`) + theme.fg("muted", timeStr));
+								} else {
+									lines.push(`${prefix}${title}${gap}${theme.fg("dim", timeStr)}`);
+								}
+							}
+
+							if (filtered.length > maxVisible) {
+								lines.push(theme.fg("dim", `  (${selectedIdx + 1}/${filtered.length})`));
+							}
+						}
+
+						lines.push("");
+						lines.push(theme.fg("dim", " ↑↓ navigate • type to search • enter select • esc cancel"));
+						lines.push(...bottomBorder.render(w));
+						return lines;
+					},
+					invalidate: () => {
+						topBorder.invalidate();
+						bottomBorder.invalidate();
+						searchInput.invalidate();
+					},
 					handleInput: (data: string) => {
-						selectList.handleInput(data);
+						if (matchesKey(data, Key.up)) {
+							if (filtered.length > 0) {
+								selectedIdx = selectedIdx === 0 ? filtered.length - 1 : selectedIdx - 1;
+							}
+						} else if (matchesKey(data, Key.down)) {
+							if (filtered.length > 0) {
+								selectedIdx = selectedIdx >= filtered.length - 1 ? 0 : selectedIdx + 1;
+							}
+						} else if (matchesKey(data, Key.enter)) {
+							done(filtered[selectedIdx]?.filePath ?? null);
+							return;
+						} else if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
+							done(null);
+							return;
+						} else {
+							searchInput.handleInput(data);
+							refilter();
+						}
 						tui.requestRender();
 					},
 				};
