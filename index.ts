@@ -58,13 +58,14 @@ interface SaveParams {
 	snapshot: LoadedContextState | null;
 	model: Parameters<typeof complete>[0];
 	apiKey: string;
+	headers?: Record<string, string>;
 }
 
 async function saveInBackground(
 	ctx: ExtensionCommandContext,
 	params: SaveParams,
 ): Promise<void> {
-	const { conversationText, availablePages, isUpdate, extraGoal, snapshot, model, apiKey } = params;
+	const { conversationText, availablePages, isUpdate, extraGoal, snapshot, model, apiKey, headers } = params;
 
 	try {
 		// LLM extraction
@@ -83,7 +84,7 @@ async function saveInBackground(
 		const response = await complete(
 			model,
 			{ systemPrompt: EXTRACT_SYSTEM_PROMPT, messages: [userMessage] },
-			{ apiKey },
+			{ apiKey, headers },
 		);
 
 		if (response.stopReason === "aborted") {
@@ -206,7 +207,13 @@ export default function (pi: ExtensionAPI) {
 			const isUpdate = loadedContext !== null;
 			const extraGoal = args?.trim() || undefined;
 			const model = ctx.model;
-			const apiKey = await ctx.modelRegistry.getApiKey(model);
+			const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+			if (!auth.ok || !auth.apiKey) {
+				ctx.ui.notify("No API key for current model", "error");
+				return;
+			}
+			const apiKey = auth.apiKey;
+			const headers = auth.headers;
 
 			// Snapshot loadedContext before going async
 			const snapshot = isUpdate ? { ...loadedContext! } : null;
@@ -229,6 +236,7 @@ export default function (pi: ExtensionAPI) {
 				snapshot,
 				model,
 				apiKey,
+				headers,
 			}).catch(() => {});
 
 			// Returns immediately — user can keep working
