@@ -3,10 +3,11 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
+  "packageManager": "pnpm@10.28.0",
   "pi": {
     "extensions": ["./index.ts"]
   },
   "scripts": {
-    "test": "npx tsx --test context.test.ts"
+    "test": "pnpx tsx --test context.test.ts"
   }
 }

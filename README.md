@@ -64,7 +64,7 @@ LOGSEQ_DIR=~/personal-graph pi
 ## Testing
 
 ```bash
-npx tsx --test context.test.ts
+pnpm test
 ```
 
 ## License

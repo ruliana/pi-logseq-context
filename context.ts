@@ -317,13 +317,7 @@ export function buildExtractionPrompt(
 /**
  * The system prompt used to extract context from a conversation.
  */
-export const EXTRACT_SYSTEM_PROMPT = `You extract structured context from conversations. You NEVER continue, summarize, or echo the conversation. You ONLY output a JSON object.
-
-The context must be SELF-CONTAINED. Another AI agent will use ONLY this context to continue the work — no access to the original conversation, no guessing.
-
-Your output must be a single valid JSON object with this exact schema — no prose, no markdown fences, no explanation before or after:
-
-{
+const EXTRACT_OUTPUT_SCHEMA = `{
   "title": "short descriptive title (3-6 words)",
   "goal": "what the user is trying to accomplish (1-2 sentences)",
   "currentState": "where things stand right now (1-3 sentences)",
@@ -331,21 +325,62 @@ Your output must be a single valid JSON object with this exact schema — no pro
   "files": ["/absolute/path/to/file.ts"],
   "nextSteps": ["next step 1", "next step 2"],
   "references": ["[[Logseq Page Name]]", "https://github.com/org/repo/pull/123"]
-}
+}`;
 
-Rules:
-- Be terse. Every word must earn its place.
-- SELF-CONTAINED: include everything another agent needs. No ambiguous references like "the plan" or "the PR".
-- LINK TO EXISTING PAGES: when the conversation mentions a project, person, team, concept, or tool that matches a page in <available_logseq_pages>, use [[Page Name]] syntax in ALL text fields (goal, currentState, keyDecisions, nextSteps) — not just in references.
+export const EXTRACT_SYSTEM_PROMPT_RULES = [
+	{
+		id: "handoff-completeness",
+		text: `- Optimize for handoff, not transcript summary. Capture the facts another agent needs to act: current goal, resolved state, constraints, open questions, exact commands/tests/results, branch names, commit hashes, issue/PR numbers, API names, table names, feature flags, environment names, and other task-specific identifiers.`,
+	},
+	{
+		id: "concise-completeness",
+		text: `- Be concise but complete. Omit conversation noise, not facts or references needed to resume.`,
+	},
+	{
+		id: "self-contained-references",
+		text: `- SELF-CONTAINED: include everything another agent needs. No ambiguous references like "the plan", "the PR", "the failing test", "that file", or "it" when the conversation contains an exact title, path, URL, command, error, or ID.`,
+	},
+	{
+		id: "logseq-page-links",
+		text: `- LINK TO EXISTING PAGES: when the conversation mentions a project, person, team, concept, or tool that matches a page in <available_logseq_pages>, use [[Page Name]] syntax in ALL text fields (goal, currentState, keyDecisions, nextSteps) — not just in references.
   Example: "Deployed [[SimGym]] with [[Roman]]'s review" — not "Deployed SimGym with Roman's review".
-  Match page names case-sensitively. Only link pages that actually appear in the available list.
-- files: use FULL ABSOLUTE paths. Include all files relevant to the task: source code, plans, configs, scripts.
-  If a plan or design doc is mentioned, include its path (e.g., "~/project/plan.md"), not "the plan".
-- When mentioning file paths in ANY text field (goal, currentState, keyDecisions, nextSteps), wrap them in backticks: \`/path/to/file.ts\`. The files array values are plain strings (no backticks) — backticks are only for paths embedded in prose.
-- references: include logseq page names AND full URLs.
-  PRs → full GitHub URL (e.g., "https://github.com/acme-org/repo/pull/42"), not "PR #42".
-  Dashboards, docs, external resources → full URL.
+  Match page names case-sensitively. Only link pages that actually appear in the available list.`,
+	},
+	{
+		id: "file-paths",
+		text: `- files: use FULL ABSOLUTE paths. Include every file required to understand or continue the task: source code, tests, plans, configs, scripts, docs, generated artifacts, and screenshots.
+  If a plan or design doc is mentioned, include its path (e.g., "/Users/ronie/project/plan.md"), not "the plan".`,
+	},
+	{
+		id: "inline-path-formatting",
+		text: `- When mentioning file paths in ANY text field (goal, currentState, keyDecisions, nextSteps), wrap them in backticks: \`/path/to/file.ts\`. The files array values are plain strings (no backticks) — backticks are only for paths embedded in prose.`,
+	},
+	{
+		id: "references",
+		text: `- references: include ALL Logseq page references and URL-backed references future work depends on, using their most specific stable form.
+  PRs/issues/commits → full GitHub URL (e.g., "https://github.com/acme-org/repo/pull/42"), not "PR #42".
+  Dashboards, docs, Slack threads, traces, tickets, specs, external resources → full URL when present.
   Logseq concepts → [[page name]] for pages that exist in the graph.
-- keyDecisions: only decisions that affect future work.
-- Omit back-and-forth, failed attempts, and irrelevant tangents.
-- Output ONLY the JSON object. No text before or after it.`;
+  Non-URL identifiers without a Logseq page (trace IDs, table names, feature flags, branch names, commands, errors) belong in goal, currentState, keyDecisions, or nextSteps, not references.
+  If a URL or Logseq page reference appears in goal, currentState, keyDecisions, or nextSteps, also include it in references.`,
+	},
+	{
+		id: "future-decisions-only",
+		text: `- keyDecisions: only decisions that affect future work.`,
+	},
+	{
+		id: "exclude-process-noise",
+		text: `- Exclude failed attempts, exploratory dead ends, back-and-forth, apologies, and irrelevant tangents. If a failed action leaves an unresolved blocker, record only the current blocker/result and its implication, not the attempt history.`,
+	},
+	{
+		id: "json-only",
+		text: `- Output ONLY the JSON object. No text before or after it.`,
+	},
+] as const;
+
+export const EXTRACT_SYSTEM_PROMPT = [
+	`You extract structured handoff context from conversations. You NEVER continue, summarize, or echo the conversation. You ONLY output a JSON object.`,
+	`The context must be SELF-CONTAINED. Another AI agent must be able to continue the job using only this JSON and the files, URLs, IDs, and pages it names, without reading the original conversation or searching to rediscover missing references. Preserve the current goal, state, decisions, constraints, exact identifiers, and references needed to resume.`,
+	`Your output must be a single valid JSON object with this exact schema — no prose, no markdown fences, no explanation before or after:\n\n${EXTRACT_OUTPUT_SCHEMA}`,
+	`Rules:\n${EXTRACT_SYSTEM_PROMPT_RULES.map((rule) => rule.text).join("\n")}`,
+].join("\n\n");

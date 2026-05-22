@@ -8,6 +8,8 @@ import {
 	journalRef,
 	buildContextPage,
 	buildExtractionPrompt,
+	EXTRACT_SYSTEM_PROMPT,
+	EXTRACT_SYSTEM_PROMPT_RULES,
 	buildJournalEntry,
 	upsertJournalEntry,
 	extractCreatedDate,
@@ -461,5 +463,36 @@ describe("buildExtractionPrompt", () => {
 		const pagesIdx = prompt.indexOf("<available_logseq_pages>");
 		const instructIdx = prompt.indexOf("Now extract the context");
 		assert.ok(pagesIdx < instructIdx, "pages should come before extraction instruction");
+	});
+});
+
+describe("EXTRACT_SYSTEM_PROMPT", () => {
+	it("renders every named rule into the prompt", () => {
+		for (const rule of EXTRACT_SYSTEM_PROMPT_RULES) {
+			assert.ok(EXTRACT_SYSTEM_PROMPT.includes(rule.text), `missing rule ${rule.id}`);
+		}
+	});
+
+	it("requires self-contained handoff context without rediscovery", () => {
+		const rules = EXTRACT_SYSTEM_PROMPT_RULES.map((rule) => rule.id);
+		assert.ok(rules.includes("handoff-completeness"));
+		assert.ok(rules.includes("self-contained-references"));
+		assert.ok(EXTRACT_SYSTEM_PROMPT.includes("continue the job using only this JSON"));
+		assert.ok(EXTRACT_SYSTEM_PROMPT.includes("without reading the original conversation or searching"));
+	});
+
+	it("requires complete URL and Logseq references without overloading references", () => {
+		const referencesRule = EXTRACT_SYSTEM_PROMPT_RULES.find((rule) => rule.id === "references")?.text ?? "";
+		assert.ok(referencesRule.includes("include ALL Logseq page references and URL-backed references"));
+		assert.ok(referencesRule.includes("full GitHub URL"));
+		assert.ok(referencesRule.includes("Non-URL identifiers without a Logseq page"));
+		assert.ok(referencesRule.includes("not references"));
+	});
+
+	it("excludes failed attempts and conversation back-and-forth", () => {
+		const noiseRule = EXTRACT_SYSTEM_PROMPT_RULES.find((rule) => rule.id === "exclude-process-noise")?.text ?? "";
+		assert.ok(noiseRule.includes("Exclude failed attempts"));
+		assert.ok(noiseRule.includes("back-and-forth"));
+		assert.ok(noiseRule.includes("not the attempt history"));
 	});
 });
