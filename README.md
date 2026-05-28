@@ -1,36 +1,54 @@
 # logseq-context
 
-A [pi](https://github.com/nichochar/pi-coding-agent) extension that saves and loads conversation context as [Logseq](https://logseq.com/) pages. Designed for multi-session workflows where you need to hand off context between AI conversations.
+A [pi](https://github.com/nichochar/pi-coding-agent) extension that creates and loads task handoffs as [Logseq](https://logseq.com/) pages. A handoff captures the task state, goal, decisions, file groups with reasons, and references needed for another AI agent to take over without the original conversation.
 
 ## Commands
 
-### `/save-context [extra goal]`
+### `/create-handoff <handoff goal>`
 
-Extracts structured context from the current conversation using an LLM and writes it as a Logseq page under `~/logseq/pages/`. Also adds a journal entry referencing the context page.
+Extracts a structured handoff from the current conversation using an LLM and writes it as a Logseq page under `~/logseq/pages/`. Also adds a journal entry referencing the handoff page.
 
 - Runs in the background — you can keep working while it saves
-- If a context was previously loaded via `/load-context`, it updates that page in place
-- Optional argument overrides the inferred goal
+- If a handoff was previously loaded via `/load-handoff`, it updates that page in place
+- The argument is the handoff goal or intent and scopes what the prompt includes
+- Files are grouped by the reason the next agent should read them
+- No next steps are generated; the user decides the next action after loading the handoff
+- The prompt prefers references over snippets: Logseq pages, docs, local paths, GitHub URLs, artifact paths, symbols, commands, tests, and other durable references
 
-### `/load-context`
+### `/update-handoff [update focus]`
 
-Opens a fuzzy-searchable selector of all saved context pages. Selecting one injects its content into the conversation with instructions for the agent to summarize the state before continuing.
+Updates the handoff loaded via `/load-handoff` in the current session. It reads the existing handoff page, uses only the conversation that happened after the handoff was loaded, and writes a complete replacement page back to the same Logseq file.
+
+- Optional argument scopes the update, for example `refresh current state only`
+- Rediscovers a loaded handoff from the conversation if the extension was reloaded after `/load-handoff`
+- Fails if no handoff is loaded in the current session
+- Runs in the background and upserts the journal reference like `/create-handoff`
+
+### `/load-handoff`
+
+Opens a fuzzy-searchable selector of saved handoff pages, including legacy `AI Context` pages. Selecting one injects its content into the conversation with instructions for the agent to summarize the handoff goal and current state before continuing.
+
+### `/load-logseq`
+
+Opens an rg-backed selector for any Logseq markdown page under `~/logseq/pages/` or `~/logseq/journals/`. Results are rebuilt from disk as you type, matched against both file paths and Logseq page names, and sorted by most recent modification time first. Selecting a page injects its content into the conversation.
 
 ## How It Works
 
-1. **Save**: serializes the conversation, sends it to the current model with an extraction prompt, and writes a structured Logseq page with title, goal, current state, key decisions, files, next steps, and references
-2. **Load**: parses context pages from `~/logseq/pages/`, presents them in a `SelectList`, and injects the selected page as a follow-up message
-3. **Journal integration**: each save upserts a reference in the daily journal file (`~/logseq/journals/`)
-4. **Logseq page linking**: the extraction prompt is aware of existing pages in your graph and uses `[[Page Name]]` syntax for cross-references
+1. **Create**: serializes the conversation, sends it to the current model with a handoff extraction prompt, and writes a structured Logseq page with title, goal, current state, key decisions, file groups with reasons, and references
+2. **Load handoff**: parses handoff pages from `~/logseq/pages/`, including legacy `AI Context___*.md` pages, presents them in a selector, and injects the selected page as a follow-up message
+3. **Update handoff**: reads the loaded handoff page and updates it from the conversation entries after the load point, excluding the injected handoff content itself
+4. **Load Logseq**: uses `rg --files` against `~/logseq/pages/` and `~/logseq/journals/`, filters matches with `rg` as you type, and injects the selected page as a follow-up message
+5. **Journal integration**: each create/update upserts a reference in the daily journal file (`~/logseq/journals/`)
+6. **Logseq page linking**: the prompt is aware of existing pages in your graph and uses `[[Page Name]]` syntax for cross-references
 
 ## Directory Structure
 
 ```
 ~/logseq/
 ├── pages/
-│   └── pi-context___<slug>.md    # saved context pages
+│   └── AI Handoff___<slug>.md    # saved handoff pages
 └── journals/
-    └── 2025_03_21.md             # journal entries with context references
+    └── 2025_03_21.md             # journal entries with handoff references
 ```
 
 ## Installation
