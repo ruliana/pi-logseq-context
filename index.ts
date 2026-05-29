@@ -385,11 +385,9 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			const handoffGoal = args?.trim();
-			if (!handoffGoal) {
-				ctx.ui.notify("create-handoff requires a handoff goal or intent", "error");
-				return;
-			}
+			// Goal/intent is optional. Default to a generic continue-later handoff.
+			const handoffGoal =
+				args?.trim() || "Produce a handoff to continue this session later.";
 
 			if (!ctx.model) {
 				ctx.ui.notify("No model selected", "error");

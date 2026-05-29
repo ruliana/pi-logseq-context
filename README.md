@@ -4,13 +4,13 @@ A [pi](https://github.com/nichochar/pi-coding-agent) extension that creates and 
 
 ## Commands
 
-### `/create-handoff <handoff goal>`
+### `/create-handoff [handoff goal]`
 
 Extracts a structured handoff from the current conversation using an LLM and writes it as a Logseq page under `~/logseq/pages/`. Also adds a journal entry referencing the handoff page.
 
 - Runs in the background — you can keep working while it saves
 - If a handoff was previously loaded via `/load-handoff`, it updates that page in place
-- The argument is the handoff goal or intent and scopes what the prompt includes
+- The argument is optional. When provided, it is the handoff goal or intent and scopes what the prompt includes; when omitted, the intent defaults to producing a handoff to continue the session later
 - Files are grouped by the reason the next agent should read them
 - No next steps are generated; the user decides the next action after loading the handoff
 - The prompt prefers references over snippets: Logseq pages, docs, local paths, GitHub URLs, artifact paths, symbols, commands, tests, and other durable references
