@@ -17,7 +17,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
-import { execSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { complete, type Message } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, SessionEntry } from "@mariozechner/pi-coding-agent";
 import { DynamicBorder, convertToLlm, serializeConversation } from "@mariozechner/pi-coding-agent";
@@ -40,6 +40,7 @@ import {
 	parseContextFiles,
 	type LoadedContextState,
 } from "./context.ts";
+import { lintSavedPages } from "./lint-saved.ts";
 
 /**
  * Format a timestamp as a relative time string (e.g. "5 min ago", "3 days ago").
@@ -349,22 +350,16 @@ async function createHandoffInBackground(
 		});
 		writeFileSync(jPath, updatedJournal, "utf-8");
 
-		// Run logseq-lint
-		const linter = `${process.env.HOME}/.local/bin/logseq-lint.js`;
-		for (const fp of [targetPath, jPath]) {
-			try {
-				execSync(`bun ${linter} --fix --root ${LOGSEQ_DIR} ${fp}`, {
-					encoding: "utf-8",
-					timeout: 10_000,
-				});
-			} catch {
-				// Lint errors are non-fatal
-			}
-		}
+		// Report only: lint never rewrites the handoff page or the journal.
+		const lint = await lintSavedPages([targetPath, jPath], LOGSEQ_DIR);
 
 		const verb = isUpdate ? "updated" : "created";
 		ctx.ui.setWidget(widgetKey, undefined);
-		ctx.ui.notify(`Handoff ${verb}: ${targetPath}`, "success");
+		if (lint.ok) {
+			ctx.ui.notify(`Handoff ${verb}: ${targetPath} (lint passed)`, "success");
+		} else {
+			ctx.ui.notify([`Handoff ${verb}: ${targetPath}`, ...lint.messages].join("\n"), "warning");
+		}
 	} catch (err) {
 		ctx.ui.setWidget(widgetKey, undefined);
 		ctx.ui.notify(`Handoff ${isUpdate ? "update" : "creation"} failed: ${err}`, "error");

@@ -77,7 +77,7 @@ LOGSEQ_DIR=~/personal-graph pi
 ## Requirements
 
 - A Logseq graph with `pages/` and `journals/` directories (defaults to `~/logseq/`)
-- Optional: `logseq-lint.js` at `~/.local/bin/logseq-lint.js` for post-save formatting
+- `logseq-lint.js` at `~/.local/bin/logseq-lint.js` and `../logseq-lint.ts` (the Pi agent's lint hook, which owns the rule config) for the post-save lint report. Report only: it never rewrites the handoff page or the journal.
 
 ## Testing
 
