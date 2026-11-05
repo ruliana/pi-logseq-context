@@ -1,54 +1,59 @@
 # logseq-context
 
-A [pi](https://github.com/nichochar/pi-coding-agent) extension that creates and loads task handoffs as [Logseq](https://logseq.com/) pages. A handoff captures the task state, goal, decisions, file groups with reasons, and references needed for another AI agent to take over without the original conversation.
+A [pi](https://github.com/nichochar/pi-coding-agent) extension that creates and loads task handoffs as pages in a Tessela notes bundle (a folder of Markdown pages with YAML frontmatter). A handoff captures the task state, goal, decisions, file groups with reasons, and references needed for another AI agent to take over without the original conversation.
+
+The name is historical: the extension started on a Logseq graph and now writes to Tessela. The old `/load-logseq` command still works.
 
 ## Commands
 
 ### `/create-handoff [handoff goal]`
 
-Extracts a structured handoff from the current conversation using an LLM and writes it as a Logseq page under `~/logseq/pages/`. Also adds a journal entry referencing the handoff page.
+Extracts a structured handoff from the current conversation using an LLM and writes it as `ai-handoff/<slug>.md` in the bundle (default `~/tessela`). Also adds a line to today's journal (`journals/YYYY-MM-DD.md`, in the America/Toronto time zone) that links to the page as `[AI Handoff/<Title>](/ai-handoff/<slug>.md)`. A missing journal file is created with frontmatter.
 
 - Runs in the background — you can keep working while it saves
 - If a handoff was previously loaded via `/load-handoff`, it updates that page in place
 - The argument is optional. When provided, it is the handoff goal or intent and scopes what the prompt includes; when omitted, the intent defaults to producing a handoff to continue the session later
 - Files are grouped by the reason the next agent should read them
 - No next steps are generated; the user decides the next action after loading the handoff
-- The prompt prefers references over snippets: Logseq pages, docs, local paths, GitHub URLs, artifact paths, symbols, commands, tests, and other durable references
+- The prompt prefers references over snippets: note pages, docs, local paths, GitHub URLs, artifact paths, symbols, commands, tests, and other durable references
+- After saving, it runs `tessela lint` on the page and the journal and reports the result. It never rewrites them
 
 ### `/update-handoff [update focus]`
 
-Updates the handoff loaded via `/load-handoff` in the current session. It reads the existing handoff page, uses only the conversation that happened after the handoff was loaded, and writes a complete replacement page back to the same Logseq file.
+Updates the handoff loaded via `/load-handoff` in the current session. It reads the existing handoff page, uses only the conversation that happened after the handoff was loaded, and writes a complete replacement page back to the same file.
 
 - Optional argument scopes the update, for example `refresh current state only`
 - Rediscovers a loaded handoff from the conversation if the extension was reloaded after `/load-handoff`
 - Fails if no handoff is loaded in the current session
-- Runs in the background and upserts the journal reference like `/create-handoff`
+- Runs in the background and bumps the journal line like `/create-handoff` (`Updated AI handoff: ... (2)`)
 
 ### `/load-handoff`
 
-Opens a fuzzy-searchable selector of saved handoff pages, including legacy `AI Context` pages. Selecting one injects its content into the conversation with instructions for the agent to summarize the handoff goal and current state before continuing.
+Opens a fuzzy-searchable selector of saved handoff pages (`ai-handoff/*.md`, shown by their frontmatter title). Selecting one injects its content into the conversation with instructions for the agent to summarize the handoff goal and current state before continuing.
 
-### `/load-logseq`
+### `/load-notes` (alias `/load-logseq`)
 
-Opens an rg-backed selector for any Logseq markdown page under `~/logseq/pages/` or `~/logseq/journals/`. Results are rebuilt from disk as you type, matched against both file paths and Logseq page names, and sorted by most recent modification time first. Selecting a page injects its content into the conversation.
+Opens an rg-backed selector for any Markdown page in the bundle, except `assets/` and hidden folders. Results are rebuilt from disk as you type, matched against the page path, and sorted by most recent modification time first. Selecting a page injects its content into the conversation.
 
 ## How It Works
 
-1. **Create**: serializes the conversation, sends it to the current model with a handoff extraction prompt, and writes a structured Logseq page with title, goal, current state, key decisions, file groups with reasons, and references
-2. **Load handoff**: parses handoff pages from `~/logseq/pages/`, including legacy `AI Context___*.md` pages, presents them in a selector, and injects the selected page as a follow-up message
+1. **Create**: serializes the conversation, sends it to the current model with a handoff extraction prompt, and writes a Tessela page: frontmatter (`type: concept`, `title: "AI Handoff/<Title>"`, `tags`, `created`), then bold section labels (Goal, Current State, Key Decisions, Files, References) with lists under them
+2. **Load handoff**: lists `ai-handoff/*.md`, presents them in a selector, and injects the selected page as a follow-up message
 3. **Update handoff**: reads the loaded handoff page and updates it from the conversation entries after the load point, excluding the injected handoff content itself
-4. **Load Logseq**: uses `rg --files` against `~/logseq/pages/` and `~/logseq/journals/`, filters matches with `rg` as you type, and injects the selected page as a follow-up message
-5. **Journal integration**: each create/update upserts a reference in the daily journal file (`~/logseq/journals/`)
-6. **Logseq page linking**: the prompt is aware of existing pages in your graph and uses `[[Page Name]]` syntax for cross-references
+4. **Load notes**: uses `rg --files` against the bundle, filters matches with `rg` as you type, and injects the selected page as a follow-up message
+5. **Journal integration**: each create/update upserts a line in the daily journal file
+6. **Page linking**: the prompt gets the concept paths of the bundle's pages (`/simgym.md`) and writes Markdown links `[SimGym](/simgym.md)`. A stray `[[wikilink]]` is converted to a Markdown link before saving
+
+File names follow the Tessela rule: the title in lowercase, whitespace runs as `-`, other punctuation dropped (`SimGym Flat-List Prompt` becomes `simgym-flat-list-prompt.md`). `index`, `log` and `home` get `-page` added.
 
 ## Directory Structure
 
 ```
-~/logseq/
-├── pages/
-│   └── AI Handoff___<slug>.md    # saved handoff pages
+~/tessela/
+├── ai-handoff/
+│   └── <slug>.md             # saved handoff pages
 └── journals/
-    └── 2025_03_21.md             # journal entries with handoff references
+    └── 2026-11-05.md         # journal days with handoff links
 ```
 
 ## Installation
@@ -63,27 +68,24 @@ Pi auto-discovers extensions via the `pi.extensions` field in `package.json`.
 
 ## Configuration
 
-Set `LOGSEQ_DIR` to override the default graph location (`~/logseq`):
+Set `TESSELA_DIR` to override the default bundle location (`~/tessela`):
 
 ```bash
-# Global default
-export LOGSEQ_DIR=~/my-logseq-graph
-
-# Per-session: prefix the pi command to use a specific graph
-LOGSEQ_DIR=~/work-graph pi
-LOGSEQ_DIR=~/personal-graph pi
+TESSELA_DIR=~/other-notes pi
 ```
 
 ## Requirements
 
-- A Logseq graph with `pages/` and `journals/` directories (defaults to `~/logseq/`)
-- `logseq-lint.js` at `~/.local/bin/logseq-lint.js` and `../logseq-lint.ts` (the Pi agent's lint hook, which owns the rule config) for the post-save lint report. Report only: it never rewrites the handoff page or the journal.
+- A Tessela bundle (defaults to `~/tessela/`) and the `tessela` CLI on `PATH`
+- `../logseq-lint.ts` (the Pi agent's lint hook) for the post-save lint report. Report only: it never rewrites the handoff page or the journal.
 
 ## Testing
 
 ```bash
 pnpm test
 ```
+
+`acceptance.test.ts` clones `~/tessela` (or `$TESSELA_BUNDLE`) into a temp folder, saves handoffs there, and checks that `tessela lint` reports no error or warning for the new pages and journals. It is skipped when `tessela` or the bundle is missing.
 
 ## License
 
