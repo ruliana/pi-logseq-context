@@ -1,9 +1,9 @@
 /**
- * Logseq handoff extension.
+ * Handoff extension for a Tessela notes bundle (default ~/tessela, set TESSELA_DIR to change).
  *
- * /create-handoff — Reflect on the conversation and create a Logseq handoff
- *                   page with everything another AI agent needs to take over.
- *                   Also adds a journal entry referencing the handoff page.
+ * /create-handoff — Reflect on the conversation and create a handoff page
+ *                   (ai-handoff/<slug>.md) with everything another AI agent needs to take over.
+ *                   Also adds a journal entry (journals/YYYY-MM-DD.md) linking to the handoff page.
  *                   If a handoff was loaded this session, updates it in place.
  *
  * /update-handoff — Update the loaded handoff using conversation that happened
@@ -12,11 +12,12 @@
  * /load-handoff — Show an fzf-style fuzzy finder of saved handoffs (sorted
  *                 by recency), load the selected one into the conversation.
  *
- * /load-logseq — Use rg to scan Logseq pages and journals as the user types,
+ * /load-notes — Use rg to scan the bundle's pages and journals as the user types,
  *                then load the selected page into the conversation.
+ *                /load-logseq is the old name and still works.
  */
 
-import { existsSync, readFileSync, writeFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { complete, type Message } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext, SessionEntry } from "@mariozechner/pi-coding-agent";
@@ -24,23 +25,19 @@ import { DynamicBorder, convertToLlm, serializeConversation } from "@mariozechne
 import { Input, fuzzyFilter, matchesKey, Key, truncateToWidth, visibleWidth } from "@mariozechner/pi-tui";
 
 import {
-	LOGSEQ_DIR,
+	HANDOFF_FOLDER,
+	NOTES_DIR,
 	EXTRACT_SYSTEM_PROMPT,
-	buildContextPage,
 	buildExtractionPrompt,
 	buildUpdatePrompt,
-	upsertJournalEntry,
-	contextPagePath,
-	extractCreatedDate,
 	extractJSON,
-	filenamesToPageNames,
+	availablePagePaths,
 	filePathToPageName,
-	journalPath,
-	journalRef,
 	parseContextFiles,
 	type LoadedContextState,
 } from "./context.ts";
 import { lintSavedPages } from "./lint-saved.ts";
+import { saveHandoff } from "./save.ts";
 
 /**
  * Format a timestamp as a relative time string (e.g. "5 min ago", "3 days ago").
@@ -79,14 +76,14 @@ function xmlAttribute(attrs: string, name: string): string | null {
 	return match?.[1] !== undefined ? unescapeXmlAttribute(match[1]) : null;
 }
 
-interface LogseqPageSearchItem {
+interface NotePageSearchItem {
 	title: string;
 	pageName: string;
 	filePath: string;
 	mtime: Date;
 }
 
-const MAX_LOGSEQ_SEARCH_RESULTS = 200;
+const MAX_NOTE_SEARCH_RESULTS = 200;
 
 function runRg(args: string[], input?: string): string[] {
 	const result = spawnSync("rg", args, {
@@ -102,8 +99,8 @@ function runRg(args: string[], input?: string): string[] {
 	return result.stdout.split("\n").filter(Boolean);
 }
 
-function logseqSearchRoots(): string[] {
-	return [`${LOGSEQ_DIR}/pages`, `${LOGSEQ_DIR}/journals`].filter((dir) => existsSync(dir));
+function noteSearchRoots(): string[] {
+	return [NOTES_DIR].filter((dir) => existsSync(dir));
 }
 
 function filterLinesWithRg(lines: string[], query: string): string[] {
@@ -118,11 +115,11 @@ function filterLinesWithRg(lines: string[], query: string): string[] {
 	return filtered;
 }
 
-function searchLogseqPages(query: string): LogseqPageSearchItem[] {
-	const roots = logseqSearchRoots();
+function searchNotePages(query: string): NotePageSearchItem[] {
+	const roots = noteSearchRoots();
 	if (roots.length === 0) return [];
 
-	const files = runRg(["--files", "-g", "*.md", "--", ...roots]);
+	const files = runRg(["--files", "-g", "*.md", "-g", "!assets/**", "--", ...roots]);
 	const searchableLines = files.map((filePath) => `${filePath}\t${filePathToPageName(filePath)}`);
 	const matchingLines = query.trim() ? filterLinesWithRg(searchableLines, query) : searchableLines;
 	const seen = new Set<string>();
@@ -145,15 +142,14 @@ function searchLogseqPages(query: string): LogseqPageSearchItem[] {
 			return { title: pageName, pageName, filePath, mtime };
 		})
 		.sort((a, b) => b.mtime.getTime() - a.mtime.getTime())
-		.slice(0, MAX_LOGSEQ_SEARCH_RESULTS);
+		.slice(0, MAX_NOTE_SEARCH_RESULTS);
 }
 
 type MessageEntry = SessionEntry & { type: "message" };
 
 function getAvailablePages(): string[] {
-	const pagesDir = `${LOGSEQ_DIR}/pages`;
 	try {
-		return filenamesToPageNames(readdirSync(pagesDir));
+		return availablePagePaths(readdirSync(NOTES_DIR, { recursive: true, encoding: "utf-8" }));
 	} catch {
 		return [];
 	}
@@ -193,9 +189,12 @@ function messagesAfterLoadedHandoff(
 }
 
 function handoffPages() {
-	const pagesDir = `${LOGSEQ_DIR}/pages`;
+	const dir = `${NOTES_DIR}/${HANDOFF_FOLDER}`;
 	try {
-		return parseContextFiles(readdirSync(pagesDir).map((filename) => `${pagesDir}/${filename}`));
+		return parseContextFiles(
+			readdirSync(dir).map((filename) => `${dir}/${filename}`),
+			(filePath) => readFileSync(filePath, "utf-8"),
+		);
 	} catch {
 		return [];
 	}
@@ -315,43 +314,10 @@ async function createHandoffInBackground(
 			return;
 		}
 
-		// Build page content
-		let pageContent: string;
-		let targetPath: string;
-
-		if (isUpdate && snapshot) {
-			let createdDate: string | undefined;
-			try {
-				const existing = readFileSync(snapshot.filePath, "utf-8");
-				createdDate = extractCreatedDate(existing) ?? undefined;
-			} catch {
-				// File might have been deleted
-			}
-			pageContent = buildContextPage(extracted, {
-				createdDate,
-				updatedDate: journalRef(new Date()),
-			});
-			targetPath = snapshot.filePath;
-		} else {
-			pageContent = buildContextPage(extracted);
-			targetPath = contextPagePath(extracted.title);
-		}
-
-		// Write handoff page
-		writeFileSync(targetPath, pageContent, "utf-8");
-
-		// Upsert journal entry
-		const today = new Date();
-		const jPath = journalPath(today);
-		const title = isUpdate ? snapshot!.title : extracted.title;
-		const existingJournal = existsSync(jPath) ? readFileSync(jPath, "utf-8") : "";
-		const updatedJournal = upsertJournalEntry(existingJournal, title, {
-			pageName: isUpdate ? snapshot!.pageName : undefined,
-		});
-		writeFileSync(jPath, updatedJournal, "utf-8");
+		const { targetPath, journalFile: jPath } = saveHandoff(extracted, { snapshot: isUpdate ? snapshot : null });
 
 		// Report only: lint never rewrites the handoff page or the journal.
-		const lint = await lintSavedPages([targetPath, jPath], LOGSEQ_DIR);
+		const lint = await lintSavedPages([targetPath, jPath], NOTES_DIR);
 
 		const verb = isUpdate ? "updated" : "created";
 		ctx.ui.setWidget(widgetKey, undefined);
@@ -373,7 +339,7 @@ export default function (pi: ExtensionAPI) {
 	// ── /create-handoff ──────────────────────────────────────────────
 
 	pi.registerCommand("create-handoff", {
-		description: "Create a task handoff as a Logseq page",
+		description: "Create a task handoff as a page in the Tessela notes",
 		handler: async (args, ctx) => {
 			if (!ctx.hasUI) {
 				ctx.ui.notify("create-handoff requires interactive mode", "error");
@@ -515,28 +481,28 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// ── /load-logseq ─────────────────────────────────────────────────
+	// ── /load-notes (and its old name /load-logseq) ──────────────────
 
-	pi.registerCommand("load-logseq", {
-		description: "Load any Logseq page into the conversation",
+	const loadNotes = {
+		description: "Load any page of the Tessela notes into the conversation",
 		handler: async (_args, ctx) => {
 			if (!ctx.hasUI) {
-				ctx.ui.notify("load-logseq requires interactive mode", "error");
+				ctx.ui.notify("load-notes requires interactive mode", "error");
 				return;
 			}
 
-			if (logseqSearchRoots().length === 0) {
-				ctx.ui.notify("Could not find logseq pages or journals directories", "error");
+			if (noteSearchRoots().length === 0) {
+				ctx.ui.notify(`Could not find the notes directory ${NOTES_DIR}`, "error");
 				return;
 			}
 
-			const initialPages = searchLogseqPages("");
+			const initialPages = searchNotePages("");
 			if (initialPages.length === 0) {
-				ctx.ui.notify("No Logseq pages found", "warning");
+				ctx.ui.notify("No note pages found", "warning");
 				return;
 			}
 
-			const selected = await ctx.ui.custom<LogseqPageSearchItem | null>((tui, theme, _kb, done) => {
+			const selected = await ctx.ui.custom<NotePageSearchItem | null>((tui, theme, _kb, done) => {
 				const topBorder = new DynamicBorder((s: string) => theme.fg("accent", s));
 				const bottomBorder = new DynamicBorder((s: string) => theme.fg("accent", s));
 				const searchInput = new Input();
@@ -545,13 +511,13 @@ export default function (pi: ExtensionAPI) {
 				let filtered = initialPages;
 				let selectedIdx = 0;
 				let lastQuery = "";
-				const maxVisible = Math.min(15, MAX_LOGSEQ_SEARCH_RESULTS);
+				const maxVisible = Math.min(15, MAX_NOTE_SEARCH_RESULTS);
 
 				const refilter = () => {
 					const query = searchInput.getValue();
 					if (query === lastQuery) return;
 					lastQuery = query;
-					filtered = searchLogseqPages(query);
+					filtered = searchNotePages(query);
 					selectedIdx = 0;
 				};
 
@@ -563,12 +529,12 @@ export default function (pi: ExtensionAPI) {
 					render: (w: number) => {
 						const lines: string[] = [];
 						lines.push(...topBorder.render(w));
-						lines.push(` ${theme.fg("accent", theme.bold("Load Logseq Page"))}`);
+						lines.push(` ${theme.fg("accent", theme.bold("Load Note Page"))}`);
 						lines.push(...searchInput.render(w));
 						lines.push("");
 
 						if (filtered.length === 0) {
-							lines.push(theme.fg("warning", "  No matching Logseq pages"));
+							lines.push(theme.fg("warning", "  No matching note pages"));
 						} else {
 							const startIdx = Math.max(0, Math.min(
 								selectedIdx - Math.floor(maxVisible / 2),
@@ -645,13 +611,15 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			pi.sendUserMessage(
-				`Here is a Logseq page loaded from disk:\n\n<logseq-page title="${escapeXmlAttribute(selected.pageName)}" path="${escapeXmlAttribute(selected.filePath)}">\n${content}\n</logseq-page>\n\nRead the page above. Summarize in one sentence what it contains, then list any task-relevant context or open items it provides. Do NOT start working yet — wait for instructions.`,
+				`Here is a note page loaded from disk:\n\n<note-page title="${escapeXmlAttribute(selected.pageName)}" path="${escapeXmlAttribute(selected.filePath)}">\n${content}\n</note-page>\n\nRead the page above. Summarize in one sentence what it contains, then list any task-relevant context or open items it provides. Do NOT start working yet — wait for instructions.`,
 				{ deliverAs: "followUp" },
 			);
 
-			ctx.ui.notify(`Loaded Logseq page: ${selected.pageName}`, "success");
+			ctx.ui.notify(`Loaded note page: ${selected.pageName}`, "success");
 		},
-	});
+	};
+	pi.registerCommand("load-notes", loadNotes);
+	pi.registerCommand("load-logseq", loadNotes);
 
 	// ── /load-handoff ────────────────────────────────────────────────
 
@@ -664,16 +632,7 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			// Find all handoff pages
-			const pagesDir = `${LOGSEQ_DIR}/pages`;
-			let allFiles: string[];
-			try {
-				allFiles = readdirSync(pagesDir).map((f) => `${pagesDir}/${f}`);
-			} catch {
-				ctx.ui.notify("Could not read logseq pages directory", "error");
-				return;
-			}
-
-			const handoffs = parseContextFiles(allFiles);
+			const handoffs = handoffPages();
 
 			if (handoffs.length === 0) {
 				ctx.ui.notify("No saved handoffs found", "warning");

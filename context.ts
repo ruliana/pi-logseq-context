@@ -1,12 +1,16 @@
 /**
- * Pure logic for Logseq handoff pages.
+ * Pure logic for handoff pages in a Tessela bundle (a folder of Markdown pages with YAML frontmatter).
  * No side effects — all I/O happens in index.ts.
  */
 
-export const LOGSEQ_DIR = process.env.LOGSEQ_DIR ?? `${process.env.HOME}/logseq`;
+// One setting for the bundle location; every path below takes the directory as an optional argument for tests.
+export const NOTES_DIR = process.env.TESSELA_DIR ?? `${process.env.HOME}/tessela`;
 export const NAMESPACE = "AI Handoff";
-export const LEGACY_NAMESPACES = ["AI Context"] as const;
-export const NAMESPACE_SEP = "___";
+export const HANDOFF_FOLDER = "ai-handoff";
+export const HANDOFF_TYPE = "ai-handoff";
+const HANDOFF_TAGS = ["ai", "handoff"];
+// Journal days are Ronie's local days, wherever the machine clock is set.
+export const TIME_ZONE = "America/Toronto";
 
 export interface ContextFileGroup {
 	reason: string;
@@ -44,197 +48,309 @@ export interface LoadedContextState {
 export interface BuildPageOptions {
 	/** Override the created date (preserve original on updates). */
 	createdDate?: string;
-	/** Add an updated:: property. */
+	/** Add an updated: field. */
 	updatedDate?: string;
 }
 
 /**
- * Convert a title string to a filesystem-safe slug.
- * Logseq page filenames can have spaces, but we strip characters
- * that cause issues with filesystem or logseq linking.
+ * Clean a title for display and for the link text: drop characters that break
+ * file names, Markdown links or tags.
  */
-export function slugify(title: string): string {
+export function cleanTitle(title: string): string {
 	return title
 		.trim()
-		.replace(/[/\\:*?"<>|#%&{}$!@`^+='~]/g, "")
+		.replace(/[\/\\:*?"<>|#%&{}$!@`^+='~\[\]]/g, "")
 		.replace(/\s+/g, " ")
 		.trim();
 }
 
 /**
- * Build the full Logseq page name (with namespace).
+ * Tessela file slug of a title: lowercase, whitespace runs become "-", other punctuation is dropped.
+ * OKF reserves index, log and home, so those get "-page" (the importer does the same).
  */
+export function slugify(title: string): string {
+	const slug = cleanTitle(title)
+		.toLowerCase()
+		.replace(/\s+/g, "-")
+		.replace(/[^\p{L}\p{N}_-]/gu, "")
+		.replace(/-{2,}/g, "-")
+		.replace(/^-+|-+$/g, "");
+	if (slug === "") return "untitled";
+	return ["index", "log", "home"].includes(slug) ? `${slug}-page` : slug;
+}
+
+/** Full page name (with namespace), used as the title and the link text. */
 export function contextPageName(title: string): string {
-	return `${NAMESPACE}/${slugify(title)}`;
+	return `${NAMESPACE}/${cleanTitle(title)}`;
 }
 
-/**
- * Build the file path for a handoff page.
- * Logseq stores namespaced pages with ___ separator.
- */
-export function contextPagePath(title: string): string {
-	const slug = slugify(title);
-	return `${LOGSEQ_DIR}/pages/${NAMESPACE}${NAMESPACE_SEP}${slug}.md`;
+/** Bundle-relative concept path of a handoff, as written in links: "/ai-handoff/<slug>.md". */
+export function contextHref(title: string): string {
+	return `/${HANDOFF_FOLDER}/${slugify(title)}.md`;
 }
 
-/**
- * Build the journal file path for a given date.
- */
-export function journalPath(date: Date): string {
-	const y = date.getFullYear();
-	const m = String(date.getMonth() + 1).padStart(2, "0");
-	const d = String(date.getDate()).padStart(2, "0");
-	return `${LOGSEQ_DIR}/journals/${y}_${m}_${d}.md`;
+/** File path for a handoff page. */
+export function contextPagePath(title: string, dir = NOTES_DIR): string {
+	return `${dir}/${HANDOFF_FOLDER}/${slugify(title)}.md`;
 }
 
-/**
- * Format a date as a Logseq journal reference: YYYY-MM-DD
- */
+/** Today's date (or the given instant's) as YYYY-MM-DD in Ronie's time zone. */
 export function journalRef(date: Date): string {
-	const y = date.getFullYear();
-	const m = String(date.getMonth() + 1).padStart(2, "0");
-	const d = String(date.getDate()).padStart(2, "0");
-	return `${y}-${m}-${d}`;
+	return new Intl.DateTimeFormat("en-CA", {
+		timeZone: TIME_ZONE,
+		year: "numeric",
+		month: "2-digit",
+		day: "2-digit",
+	}).format(date);
+}
+
+/** Journal file path for a given date: <dir>/journals/YYYY-MM-DD.md. */
+export function journalPath(date: Date, dir = NOTES_DIR): string {
+	return `${dir}/journals/${journalRef(date)}.md`;
+}
+
+/** Quote a string as a YAML double-quoted scalar. */
+function yamlString(value: string): string {
+	return `"${value.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+}
+
+/** Convert a file path inside the bundle to its link target: "/folder/page.md". */
+export function conceptHref(filePath: string, dir = NOTES_DIR): string {
+	const prefix = dir.endsWith("/") ? dir : `${dir}/`;
+	return `/${filePath.startsWith(prefix) ? filePath.slice(prefix.length) : filePath}`;
 }
 
 /**
- * Convert page filenames to Logseq page names.
- * "SimGym.md" → "SimGym", "Neo4j___Pregel.md" → "Neo4j/Pregel"
+ * Concept paths of the pages the model may link to, from bundle-relative file paths.
+ * Journal days, attachments, hidden folders and reserved files are left out.
  */
-export function filenamesToPageNames(filenames: string[]): string[] {
-	return filenames
-		.filter((f) => f.endsWith(".md"))
-		.map((f) => {
-			const basename = f.endsWith(".md") ? f.slice(0, -3) : f;
-			return basename.replaceAll(NAMESPACE_SEP, "/");
-		})
+export function availablePagePaths(relativePaths: string[]): string[] {
+	return relativePaths
+		.filter((p) => p.endsWith(".md"))
+		.filter((p) => !p.split("/").some((part) => part.startsWith(".")))
+		.filter((p) => !p.startsWith("assets/") && !p.startsWith("journals/"))
+		.filter((p) => !["index.md", "log.md"].includes(p.split("/").at(-1) ?? ""))
+		.map((p) => `/${p}`)
 		.sort();
 }
 
-/**
- * Convert a Logseq markdown file path to its page name.
- */
-export function filePathToPageName(filePath: string): string {
-	const parts = filePath.split("/");
-	const basename = parts.at(-1) ?? "";
-	const parent = parts.at(-2) ?? "";
-	const withoutExt = basename.endsWith(".md") ? basename.slice(0, -3) : basename;
+/** Display name of a page for /load-notes: its path in the bundle without ".md". */
+export function filePathToPageName(filePath: string, dir = NOTES_DIR): string {
+	const prefix = dir.endsWith("/") ? dir : `${dir}/`;
+	const rel = filePath.startsWith(prefix) ? filePath.slice(prefix.length) : filePath;
+	return rel.endsWith(".md") ? rel.slice(0, -3) : rel;
+}
 
-	if (parent === "journals") {
-		const match = withoutExt.match(/^(\d{4})_(\d{2})_(\d{2})$/);
-		if (match) return `${match[1]}-${match[2]}-${match[3]}`;
+/** Read one scalar frontmatter field, unquoted; null when absent. */
+function frontmatterField(fileContent: string, key: string): string | null {
+	const block = fileContent.match(/^---\n([\s\S]*?)\n---(?:\n|$)/);
+	if (!block) return null;
+	const line = block[1].match(new RegExp(`^${key}:[ \\t]*(.+)$`, "m"));
+	if (!line) return null;
+	const raw = line[1].trim();
+	if (raw.startsWith('"') && raw.endsWith('"') && raw.length >= 2) {
+		return raw.slice(1, -1).replace(/\\(["\\])/g, "$1");
 	}
-
-	return withoutExt.replaceAll(NAMESPACE_SEP, "/");
+	return raw.replace(/^'(.*)'$/, "$1");
 }
 
-/**
- * Extract the created:: date string from an existing handoff page.
- * Returns null if not found.
- */
+/** Extract the created: date from an existing handoff page. Returns null if not found. */
 export function extractCreatedDate(fileContent: string): string | null {
-	const match = fileContent.match(/^created:: \[\[(.+?)\]\]/m);
-	return match ? match[1] : null;
+	return frontmatterField(fileContent, "created");
 }
 
 /**
- * Build the markdown content for a handoff page in Logseq outliner format.
+ * Turn [[Page Name]] into [Page Name](/page-name.md) outside code spans. The model is told to write
+ * Markdown links, but Tessela has no wikilinks, so a stray one must not reach the page.
+ */
+export function wikilinksToLinks(text: string): string {
+	return text
+		.split(/(`[^`]*`)/)
+		.map((part, i) =>
+			i % 2 === 1
+				? part
+				: part.replace(/\[\[([^\]\n]+?)\]\]/g, (_m, name: string) => {
+						const label = name.trim();
+						const folders = label.split("/").map((seg) => slugify(seg));
+						return `[${label}](/${folders.join("/")}.md)`;
+					}),
+		)
+		.join("");
+}
+
+/** One Markdown list item; later lines of the text stay inside the item. */
+function bullet(text: string, depth: number): string {
+	const indent = "  ".repeat(depth);
+	// Blank lines would end the item, so they are dropped.
+	const lines = wikilinksToLinks(text.trim()).split(/\r?\n/).filter((l) => l.trim() !== "");
+	return lines.map((line, i) => (i === 0 ? `${indent}- ${line}` : `${indent}  ${line.trim()}`)).join("\n");
+}
+
+/** A reference line: URLs and Markdown links stay; [[Page]] or a bare page name become a Markdown link. */
+function referenceItem(ref: string): string {
+	const r = ref.trim();
+	if (/^https?:\/\//.test(r) || /^\[[^\]]*\]\([^)]*\)$/.test(r)) return bullet(r, 0);
+	if (/^\/.*\.md$/.test(r)) return bullet(`[${r.slice(1, -3)}](${r})`, 0);
+	const name = r.replace(/^\[\[/, "").replace(/\]\]$/, "");
+	return bullet(wikilinksToLinks(`[[${name}]]`), 0);
+}
+
+/**
+ * Build the markdown content for a handoff page: YAML frontmatter, then plain Markdown
+ * (bold section labels, each followed by a list).
  */
 export function buildContextPage(params: ContextPageParams, options?: BuildPageOptions): string {
 	const lines: string[] = [];
 
-	// Page properties
-	lines.push(`type:: #ai-handoff`);
-	lines.push(`tags:: #ai #handoff`);
-	lines.push(`created:: [[${options?.createdDate ?? journalRef(new Date())}]]`);
+	lines.push(`---`);
+	lines.push(`type: ${HANDOFF_TYPE}`);
+	lines.push(`title: ${yamlString(contextPageName(params.title))}`);
+	lines.push(`tags: [${HANDOFF_TAGS.map((t) => `"${t}"`).join(", ")}]`);
+	lines.push(`created: ${yamlString(options?.createdDate ?? journalRef(new Date()))}`);
 	if (options?.updatedDate) {
-		lines.push(`updated:: [[${options.updatedDate}]]`);
+		lines.push(`updated: ${yamlString(options.updatedDate)}`);
 	}
+	lines.push(`---`);
 	lines.push(``);
 
-	// Goal
-	lines.push(`- ## Goal`);
-	lines.push(`\t- ${params.goal}`);
+	return lines.join("\n") + "\n" + buildContextBody(params);
+}
 
-	// Current State
-	lines.push(`- ## Current State`);
-	lines.push(`\t- ${params.currentState}`);
+/**
+ * Rewrite an existing handoff page: the body comes from `params`, the frontmatter lines stay as
+ * they are (Tessela keeps unknown keys on every write) except a refreshed `updated` and any missing handoff tag.
+ * Returns null when the file has no frontmatter block to preserve.
+ */
+export function updateContextPage(existing: string, params: ContextPageParams, updatedDate: string): string | null {
+	const block = existing.match(/^---(\r?\n)([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/);
+	if (!block) return null;
+	const eol = block[1];
+	const cr = eol === "\r\n" ? "\r" : "";
+	const lines = block[2].split("\n");
+	const keyIndex = (key: string) => lines.findIndex((l) => l.startsWith(`${key}:`));
+	const quoted = (tags: string[]) => tags.map((t) => `"${t}"`).join(", ");
 
-	// Key Decisions
+	const updatedLine = `updated: ${yamlString(updatedDate)}${cr}`;
+	const u = keyIndex("updated");
+	if (u >= 0) lines[u] = updatedLine;
+	else lines.push(updatedLine);
+
+	const t = keyIndex("tags");
+	if (t < 0) {
+		lines.push(`tags: [${quoted(HANDOFF_TAGS)}]${cr}`);
+	} else {
+		const inline = lines[t].slice("tags:".length).trim(); // trim also drops a CR
+		let end = t + 1;
+		while (end < lines.length && /^\s*-\s/.test(lines[end])) end++;
+		const text = [inline, ...lines.slice(t + 1, end)].join(" ");
+		const have = new Set(text.match(/[^\s\[\],"'-][^\s\[\],"']*/g) ?? []);
+		const missing = HANDOFF_TAGS.filter((tag) => !have.has(tag));
+		if (missing.length > 0 && inline.startsWith("[") && inline.endsWith("]")) {
+			const inner = inline.slice(1, -1).trim();
+			lines[t] = `tags: [${inner === "" ? quoted(missing) : `${inner}, ${quoted(missing)}`}]${cr}`;
+		} else if (missing.length > 0 && inline === "") {
+			lines.splice(end, 0, ...missing.map((tag) => `  - ${tag}${cr}`));
+		}
+	}
+
+	return `---${eol}${lines.join("\n")}${eol}---${eol}${eol}${buildContextBody(params)}`;
+}
+
+/** The page body: bold section labels, each followed by a list. Ends with one newline. */
+export function buildContextBody(params: ContextPageParams): string {
+	const lines: string[] = [];
+
+	lines.push(`**Goal**`);
+	lines.push(bullet(params.goal, 0));
+
+	lines.push(``);
+	lines.push(`**Current State**`);
+	lines.push(bullet(params.currentState, 0));
+
 	if (params.keyDecisions.length > 0) {
-		lines.push(`- ## Key Decisions`);
-		for (const d of params.keyDecisions) {
-			lines.push(`\t- ${d}`);
-		}
+		lines.push(``);
+		lines.push(`**Key Decisions**`);
+		for (const d of params.keyDecisions) lines.push(bullet(d, 0));
 	}
 
-	// Files
 	if (params.files.length > 0) {
-		lines.push(`- ## Files`);
+		lines.push(``);
+		lines.push(`**Files**`);
 		for (const group of params.files) {
-			lines.push(`\t- ${group.reason}`);
-			for (const filePath of group.paths) {
-				lines.push(`\t\t- \`${filePath}\``);
-			}
+			lines.push(bullet(group.reason, 0));
+			for (const filePath of group.paths) lines.push(`  - \`${filePath}\``);
 		}
 	}
 
-	// References — URLs rendered bare (Logseq auto-links), page names wrapped in [[ ]]
 	if (params.references && params.references.length > 0) {
-		lines.push(`- ## References`);
-		for (const r of params.references) {
-			if (r.startsWith("http://") || r.startsWith("https://")) {
-				lines.push(`\t- ${r}`);
-			} else {
-				const ref = r.startsWith("[[") ? r : `[[${r}]]`;
-				lines.push(`\t- ${ref}`);
-			}
-		}
+		lines.push(``);
+		lines.push(`**References**`);
+		for (const r of params.references) lines.push(referenceItem(r));
 	}
 
 	return lines.join("\n") + "\n";
 }
 
-/**
- * Build a journal entry bullet referencing the handoff page.
- */
-export function buildJournalEntry(title: string, pageName = contextPageName(title)): string {
-	return `- Created AI handoff: [[${pageName}]]`;
+/** Journal entry list item that links to the handoff page. */
+export function buildJournalEntry(title: string, link = `[${contextPageName(title)}](${contextHref(title)})`, marker = "-"): string {
+	return `${marker} Created AI handoff: ${link}`;
+}
+
+/** Frontmatter for a journal file that does not exist yet. */
+export function journalFrontmatter(ref: string): string {
+	return `---\ntype: journal\ntitle: ${yamlString(ref)}\ndate: ${yamlString(ref)}\n---\n`;
 }
 
 /**
  * Update journal content to reflect a handoff create/update.
  *
- * If an entry for this handoff already exists in the journal, increments
- * the update counter (e.g. "(2)" → "(3)"). Otherwise appends a new entry.
+ * An empty journal becomes a new journal file with frontmatter. If an entry for this handoff
+ * already exists, its update counter goes up (e.g. "(2)" → "(3)"); otherwise the entry is appended.
+ * `options.pageName` and `options.href` name an existing handoff (an update of a loaded page).
  *
  * Returns the full updated journal content.
  */
 export function upsertJournalEntry(
 	journalContent: string,
 	title: string,
-	options?: { pageName?: string },
+	options?: { pageName?: string; href?: string; date?: string },
 ): string {
 	const pageName = options?.pageName ?? contextPageName(title);
-	const ref = `[[${pageName}]]`;
+	const href = options?.href ?? contextHref(title);
+	const link = `[${pageName}](${href})`;
 
-	// Match an existing entry for this handoff with optional " (N)".
+	// Match an existing entry for this handoff with optional " (N)"; the leading "- " is optional (imported journals have bare lines).
 	const entryPattern = new RegExp(
-		`^- (?:(?:Created|Updated) AI handoff|(?:Saved|Updated) AI context): \\[\\[${escapeRegExp(pageName)}\\]\\](?: \\((\\d+)\\))?$`,
+		`^([-*+] )?(?:Created|Updated) AI handoff: \\[[^\\]\\n]*\\]\\(${escapeRegExp(href)}\\)(?: \\((\\d+)\\))?$`,
 		"m",
 	);
 
 	const match = journalContent.match(entryPattern);
 	if (match) {
-		const count = match[1] ? parseInt(match[1], 10) + 1 : 2;
-		const updated = `- Updated AI handoff: ${ref} (${count})`;
-		return journalContent.replace(entryPattern, updated);
+		const count = match[2] ? parseInt(match[2], 10) + 1 : 2;
+		// A replacer function: a string would expand "$1", "$&" and similar patterns in the title.
+		return journalContent.replace(entryPattern, () => `${match[1] ?? ""}Updated AI handoff: ${link} (${count})`);
 	}
 
-	// No existing entry — append
-	const entry = buildJournalEntry(title, pageName);
-	const trimmed = journalContent.trimEnd();
-	return trimmed.length > 0 ? `${trimmed}\n${entry}\n` : `${entry}\n`;
+	const base = journalContent.trim() === "" ? `${journalFrontmatter(options?.date ?? journalRef(new Date()))}\n` : journalContent;
+	const eol = base.includes("\r\n") ? "\r\n" : "\n";
+	const withNewline = base.endsWith("\n") ? base : base + eol;
+	const lines = withNewline.replace(/(?:\r?\n)+$/, "").split("\n").map((l) => l.replace(/\r$/, ""));
+	const lastLine = lines.at(-1) ?? "";
+
+	// Handoff lines stay together, in the same list.
+	const previous = lastLine.match(/^([-*+]) (?:Created|Updated) AI handoff: /);
+	if (previous) {
+		return `${withNewline.replace(/(?:\r?\n)+$/, "")}${eol}${buildJournalEntry(title, link, previous[1])}${eol}`;
+	}
+
+	// Any other line gets a blank line first. A blank line alone does not end a list, and a list under a
+	// paragraph (such as Daily TODO) would adopt the entry, so after a list the entry uses another bullet marker.
+	const anchor = [...lines].reverse().find((l) => l.trim() !== "" && !/^\s/.test(l)) ?? "";
+	const listMarker = anchor.match(/^([-*+]) /)?.[1];
+	const marker = listMarker === "-" ? "*" : "-";
+	const gap = /\n\r?\n$/.test(withNewline) ? "" : eol;
+	return `${withNewline}${gap}${buildJournalEntry(title, link, marker)}${eol}`;
 }
 
 /** Escape special regex characters in a string. */
@@ -242,30 +358,31 @@ function escapeRegExp(s: string): string {
 	return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-/**
- * Parse a list of handoff page filenames into ContextItems.
- * Supports current "AI Handoff___Some Title.md" files and legacy "AI Context___Some Title.md" files.
- */
-export function parseContextFiles(filePaths: string[]): ContextItem[] {
-	const namespaces = [NAMESPACE, ...LEGACY_NAMESPACES];
-	return filePaths
-		.map((fp) => {
-			const basename = fp.split("/").pop() ?? "";
-			const namespace = namespaces.find((ns) => {
-				const prefix = `${ns}${NAMESPACE_SEP}`;
-				return basename.startsWith(prefix) && basename.endsWith(".md");
-			});
-			if (!namespace) return null;
+/** Pull the display title out of a handoff page: its frontmatter title without the "AI Handoff/" prefix. */
+export function handoffTitle(fileContent: string, fallback: string): string {
+	const title = frontmatterField(fileContent, "title");
+	if (!title) return fallback;
+	return title.startsWith(`${NAMESPACE}/`) ? title.slice(NAMESPACE.length + 1) : title;
+}
 
-			const prefix = `${namespace}${NAMESPACE_SEP}`;
-			const title = basename.slice(prefix.length, -3); // remove prefix and .md
-			return {
-				title,
-				pageName: `${namespace}/${title}`,
-				filePath: fp,
-			};
+/**
+ * Parse the files of the handoff folder into ContextItems.
+ * `readFile` returns a file's text; a failed read falls back to the file name as the title.
+ */
+export function parseContextFiles(filePaths: string[], readFile: (filePath: string) => string): ContextItem[] {
+	return filePaths
+		.filter((fp) => fp.endsWith(".md"))
+		.map((fp) => {
+			const basename = (fp.split("/").pop() ?? "").slice(0, -3);
+			let content = "";
+			try {
+				content = readFile(fp);
+			} catch {
+				/* file may have vanished; use the file name */
+			}
+			const title = handoffTitle(content, basename);
+			return { title, pageName: `${NAMESPACE}/${title}`, filePath: fp };
 		})
-		.filter((item): item is ContextItem => item !== null)
 		.sort((a, b) => a.title.localeCompare(b.title));
 }
 
@@ -375,7 +492,7 @@ export function buildExtractionPrompt(
 	parts.push(`<conversation>\n${conversationText}\n</conversation>`);
 
 	if (options?.availablePages && options.availablePages.length > 0) {
-		parts.push(`<available_logseq_pages>\n${options.availablePages.join("\n")}\n</available_logseq_pages>`);
+		parts.push(`<available_pages>\n${options.availablePages.join("\n")}\n</available_pages>`);
 	}
 
 	if (handoffGoal) {
@@ -411,7 +528,7 @@ export function buildUpdatePrompt(
 	parts.push(`<conversation_after_handoff_load>\n${conversationAfterLoad}\n</conversation_after_handoff_load>`);
 
 	if (options?.availablePages && options.availablePages.length > 0) {
-		parts.push(`<available_logseq_pages>\n${options.availablePages.join("\n")}\n</available_logseq_pages>`);
+		parts.push(`<available_pages>\n${options.availablePages.join("\n")}\n</available_pages>`);
 	}
 
 	if (options?.handoffGoal) {
@@ -446,7 +563,7 @@ const EXTRACT_OUTPUT_SCHEMA = `{
       "paths": ["/absolute/path/to/file.ts"]
     }
   ],
-  "references": ["[[Logseq Page Name]]", "https://github.com/org/repo/pull/123"]
+  "references": ["[Page Title](/page-slug.md)", "https://github.com/org/repo/pull/123"]
 }`;
 
 export const EXTRACT_SYSTEM_PROMPT_RULES = [
@@ -467,15 +584,15 @@ export const EXTRACT_SYSTEM_PROMPT_RULES = [
 		text: `- SELF-CONTAINED: include everything another agent needs. No ambiguous references like "the plan", "the PR", "the failing test", "that file", or "it" when the conversation contains an exact title, path, URL, command, error, or ID.`,
 	},
 	{
-		id: "logseq-page-links",
-		text: `- LINK TO EXISTING PAGES: when the conversation mentions a project, person, team, concept, or tool that matches a page in <available_logseq_pages>, use [[Page Name]] syntax in prose text fields (goal, currentState, keyDecisions, files.reason) — not just in references.
-  Example: "Deployed [[SimGym]] with [[Roman]]'s review" — not "Deployed SimGym with Roman's review".
-  Match page names case-sensitively. Only link pages that actually appear in the available list.`,
+		id: "page-links",
+		text: `- LINK TO EXISTING PAGES: <available_pages> lists the concept paths of the notes. When the conversation mentions a project, person, team, concept, or tool that matches one of them, write a Markdown link [Name](/path.md) in prose text fields (goal, currentState, keyDecisions, files.reason) — not just in references. Use the path exactly as listed. Never use [[wikilinks]].
+  Example: "Deployed [SimGym](/simgym.md) with [Roman](/roman-baiocco.md)'s review" — not "Deployed SimGym with Roman's review".
+  Only link paths that actually appear in the available list.`,
 	},
 	{
 		id: "file-paths",
 		text: `- files: group paths by why the next agent should read them. Each files item must have a reason and paths. Include every file required to understand or continue the task: source code, tests, plans, configs, scripts, docs, generated artifacts, and screenshots.
-  The reason must explain what the paths are for, e.g. "Implementation and tests for the Logseq handoff schema". Use FULL ABSOLUTE paths. If a plan or design doc is mentioned, include its path (e.g., "/Users/ronie/project/plan.md"), not "the plan".`,
+  The reason must explain what the paths are for, e.g. "Implementation and tests for the handoff schema". Use FULL ABSOLUTE paths. If a plan or design doc is mentioned, include its path (e.g., "/Users/ronie/project/plan.md"), not "the plan".`,
 	},
 	{
 		id: "inline-path-formatting",
@@ -483,16 +600,16 @@ export const EXTRACT_SYSTEM_PROMPT_RULES = [
 	},
 	{
 		id: "reference-first",
-		text: `- Prefer references over snippets. Do not paste code, docs, logs, or transcript snippets when a stable reference can point to the source. Use exact local paths, Logseq pages, GitHub URLs, docs URLs, Slack/thread URLs, trace URLs, symbol names, line ranges, commands, test names, and artifact paths. Include a short snippet only when no stable reference exists or a literal value is necessary.`,
+		text: `- Prefer references over snippets. Do not paste code, docs, logs, or transcript snippets when a stable reference can point to the source. Use exact local paths, note pages, GitHub URLs, docs URLs, Slack/thread URLs, trace URLs, symbol names, line ranges, commands, test names, and artifact paths. Include a short snippet only when no stable reference exists or a literal value is necessary.`,
 	},
 	{
 		id: "references",
-		text: `- references: include ALL Logseq page references and URL-backed references future work depends on, using their most specific stable form.
+		text: `- references: include ALL note page references and URL-backed references future work depends on, using their most specific stable form.
   PRs/issues/commits → full GitHub URL (e.g., "https://github.com/acme-org/repo/pull/42"), not "PR #42".
   Dashboards, docs, Slack threads, traces, tickets, specs, external resources → full URL when present.
-  Logseq concepts → [[page name]] for pages that exist in the graph.
-  Non-URL identifiers without a Logseq page (trace IDs, table names, feature flags, branch names, commands, errors) belong in goal, currentState, keyDecisions, or files.reason, not references.
-  If a URL or Logseq page reference appears in goal, currentState, keyDecisions, or files.reason, also include it in references.`,
+  Note pages → Markdown link [Name](/path.md) for pages that exist in <available_pages>.
+  Non-URL identifiers without a note page (trace IDs, table names, feature flags, branch names, commands, errors) belong in goal, currentState, keyDecisions, or files.reason, not references.
+  If a URL or note page reference appears in goal, currentState, keyDecisions, or files.reason, also include it in references.`,
 	},
 	{
 		id: "no-next-steps",
@@ -507,15 +624,19 @@ export const EXTRACT_SYSTEM_PROMPT_RULES = [
 		text: `- Exclude failed attempts, exploratory dead ends, back-and-forth, apologies, and irrelevant tangents. If a failed action leaves an unresolved blocker, record only the current blocker/result and its implication, not the attempt history.`,
 	},
 	{
+		id: "datetime-format",
+		text: `- Write dates as YYYY-MM-DD and datetimes with a space between date and time (2026-11-05 14:30), never with a "T". Do not write [[ ]]; the notes do not use wikilinks.`,
+	},
+	{
 		id: "json-only",
 		text: `- Output ONLY the JSON object. No text before or after it.`,
 	},
 ] as const;
 
 export const EXTRACT_SYSTEM_PROMPT = [
-	`You create structured Logseq handoff documents from conversations. A handoff transfers task knowledge to another AI agent so the next agent can take over without the original conversation. You NEVER continue, summarize, or echo the conversation. You ONLY output a JSON object.`,
+	`You create structured handoff documents from conversations. A handoff transfers task knowledge to another AI agent so the next agent can take over without the original conversation. You NEVER continue, summarize, or echo the conversation. You ONLY output a JSON object.`,
 	`The handoff must be SELF-CONTAINED through exact references. Another AI agent must be able to continue the job using only this JSON and the files, URLs, IDs, pages, symbols, commands, and artifacts it names, without reading the original conversation or searching to rediscover missing references. Preserve the handoff goal, current state, decisions, constraints, exact identifiers, and references needed to resume.`,
-	`Prefer stable references over copied snippets. Point to docs, Logseq pages, local code paths, GitHub URLs, artifact paths, and other durable sources whenever they can carry the needed context.`,
+	`Prefer stable references over copied snippets. Point to docs, note pages, local code paths, GitHub URLs, artifact paths, and other durable sources whenever they can carry the needed context.`,
 	`Your output must be a single valid JSON object with this exact schema — no prose, no markdown fences, no explanation before or after:\n\n${EXTRACT_OUTPUT_SCHEMA}`,
 	`Rules:\n${EXTRACT_SYSTEM_PROMPT_RULES.map((rule) => rule.text).join("\n")}`,
 ].join("\n\n");
