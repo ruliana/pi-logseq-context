@@ -2,12 +2,15 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import path from "node:path";
 import {
 	NOTES_DIR,
+	HANDOFF_FOLDER,
 	buildContextPage,
-	conceptHref,
 	contextPagePath,
+	conceptHref,
 	extractCreatedDate,
 	journalPath,
 	journalRef,
+	slugify,
+	updateContextPage,
 	upsertJournalEntry,
 	type ContextPageParams,
 	type LoadedContextState,
@@ -19,6 +22,17 @@ export function writeFileAtomic(filePath: string, content: string): void {
 	const tmp = `${filePath}.tmp-${process.pid}`;
 	writeFileSync(tmp, content, "utf-8");
 	renameSync(tmp, filePath);
+}
+
+/** Page path for a new handoff: the title's slug, or "-2", "-3", ... when that file exists already. */
+export function newHandoffPath(title: string, dir = NOTES_DIR): string {
+	const first = contextPagePath(title, dir);
+	if (!existsSync(first)) return first;
+	const slug = slugify(title);
+	for (let n = 2; ; n++) {
+		const candidate = `${dir}/${HANDOFF_FOLDER}/${slug}-${n}.md`;
+		if (!existsSync(candidate)) return candidate;
+	}
 }
 
 /**
@@ -34,17 +48,23 @@ export function saveHandoff(
 	let pageContent: string;
 
 	if (snapshot) {
-		let createdDate: string | undefined;
+		let existingContent: string | null = null;
 		try {
-			createdDate = extractCreatedDate(readFileSync(snapshot.filePath, "utf-8")) ?? undefined;
+			existingContent = readFileSync(snapshot.filePath, "utf-8");
 		} catch {
 			// File might have been deleted
 		}
-		pageContent = buildContextPage(extracted, { createdDate, updatedDate: journalRef(now) });
+		const kept = existingContent === null ? null : updateContextPage(existingContent, extracted, journalRef(now));
+		pageContent =
+			kept ??
+			buildContextPage(extracted, {
+				createdDate: (existingContent && extractCreatedDate(existingContent)) || undefined,
+				updatedDate: journalRef(now),
+			});
 		targetPath = snapshot.filePath;
 	} else {
 		pageContent = buildContextPage(extracted, { createdDate: journalRef(now) });
-		targetPath = contextPagePath(extracted.title, dir);
+		targetPath = newHandoffPath(extracted.title, dir);
 	}
 	writeFileAtomic(targetPath, pageContent);
 
@@ -52,7 +72,7 @@ export function saveHandoff(
 	const existing = existsSync(journalFile) ? readFileSync(journalFile, "utf-8") : "";
 	const updated = upsertJournalEntry(existing, snapshot ? snapshot.title : extracted.title, {
 		pageName: snapshot?.pageName,
-		href: snapshot ? conceptHref(snapshot.filePath, dir) : undefined,
+		href: conceptHref(targetPath, dir),
 		date: journalRef(now),
 	});
 	writeFileAtomic(journalFile, updated);

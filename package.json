@@ -8,6 +8,6 @@
     "extensions": ["./index.ts"]
   },
   "scripts": {
-    "test": "pnpx tsx --test context.test.ts acceptance.test.ts"
+    "test": "pnpx tsx --test context.test.ts save.test.ts acceptance.test.ts"
   }
 }

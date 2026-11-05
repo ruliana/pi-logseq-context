@@ -7,6 +7,8 @@
 export const NOTES_DIR = process.env.TESSELA_DIR ?? `${process.env.HOME}/tessela`;
 export const NAMESPACE = "AI Handoff";
 export const HANDOFF_FOLDER = "ai-handoff";
+export const HANDOFF_TYPE = "ai-handoff";
+const HANDOFF_TAGS = ["ai", "handoff"];
 // Journal days are Ronie's local days, wherever the machine clock is set.
 export const TIME_ZONE = "America/Toronto";
 
@@ -201,15 +203,62 @@ export function buildContextPage(params: ContextPageParams, options?: BuildPageO
 	const lines: string[] = [];
 
 	lines.push(`---`);
-	lines.push(`type: concept`);
+	lines.push(`type: ${HANDOFF_TYPE}`);
 	lines.push(`title: ${yamlString(contextPageName(params.title))}`);
-	lines.push(`tags: ["ai", "handoff"]`);
+	lines.push(`tags: [${HANDOFF_TAGS.map((t) => `"${t}"`).join(", ")}]`);
 	lines.push(`created: ${yamlString(options?.createdDate ?? journalRef(new Date()))}`);
 	if (options?.updatedDate) {
 		lines.push(`updated: ${yamlString(options.updatedDate)}`);
 	}
 	lines.push(`---`);
 	lines.push(``);
+
+	return lines.join("\n") + "\n" + buildContextBody(params);
+}
+
+/**
+ * Rewrite an existing handoff page: the body comes from `params`, the frontmatter lines stay as
+ * they are (Tessela keeps unknown keys on every write) except a refreshed `updated` and any missing handoff tag.
+ * Returns null when the file has no frontmatter block to preserve.
+ */
+export function updateContextPage(existing: string, params: ContextPageParams, updatedDate: string): string | null {
+	const block = existing.match(/^---(\r?\n)([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/);
+	if (!block) return null;
+	const eol = block[1];
+	const cr = eol === "\r\n" ? "\r" : "";
+	const lines = block[2].split("\n");
+	const keyIndex = (key: string) => lines.findIndex((l) => l.startsWith(`${key}:`));
+	const quoted = (tags: string[]) => tags.map((t) => `"${t}"`).join(", ");
+
+	const updatedLine = `updated: ${yamlString(updatedDate)}${cr}`;
+	const u = keyIndex("updated");
+	if (u >= 0) lines[u] = updatedLine;
+	else lines.push(updatedLine);
+
+	const t = keyIndex("tags");
+	if (t < 0) {
+		lines.push(`tags: [${quoted(HANDOFF_TAGS)}]${cr}`);
+	} else {
+		const inline = lines[t].slice("tags:".length).trim(); // trim also drops a CR
+		let end = t + 1;
+		while (end < lines.length && /^\s*-\s/.test(lines[end])) end++;
+		const text = [inline, ...lines.slice(t + 1, end)].join(" ");
+		const have = new Set(text.match(/[^\s\[\],"'-][^\s\[\],"']*/g) ?? []);
+		const missing = HANDOFF_TAGS.filter((tag) => !have.has(tag));
+		if (missing.length > 0 && inline.startsWith("[") && inline.endsWith("]")) {
+			const inner = inline.slice(1, -1).trim();
+			lines[t] = `tags: [${inner === "" ? quoted(missing) : `${inner}, ${quoted(missing)}`}]${cr}`;
+		} else if (missing.length > 0 && inline === "") {
+			lines.splice(end, 0, ...missing.map((tag) => `  - ${tag}${cr}`));
+		}
+	}
+
+	return `---${eol}${lines.join("\n")}${eol}---${eol}${eol}${buildContextBody(params)}`;
+}
+
+/** The page body: bold section labels, each followed by a list. Ends with one newline. */
+export function buildContextBody(params: ContextPageParams): string {
+	const lines: string[] = [];
 
 	lines.push(`**Goal**`);
 	lines.push(bullet(params.goal, 0));
@@ -243,8 +292,8 @@ export function buildContextPage(params: ContextPageParams, options?: BuildPageO
 }
 
 /** Journal entry list item that links to the handoff page. */
-export function buildJournalEntry(title: string, link = `[${contextPageName(title)}](${contextHref(title)})`): string {
-	return `- Created AI handoff: ${link}`;
+export function buildJournalEntry(title: string, link = `[${contextPageName(title)}](${contextHref(title)})`, marker = "-"): string {
+	return `${marker} Created AI handoff: ${link}`;
 }
 
 /** Frontmatter for a journal file that does not exist yet. */
@@ -272,23 +321,36 @@ export function upsertJournalEntry(
 
 	// Match an existing entry for this handoff with optional " (N)"; the leading "- " is optional (imported journals have bare lines).
 	const entryPattern = new RegExp(
-		`^(- )?(?:Created|Updated) AI handoff: \\[[^\\]\\n]*\\]\\(${escapeRegExp(href)}\\)(?: \\((\\d+)\\))?$`,
+		`^([-*+] )?(?:Created|Updated) AI handoff: \\[[^\\]\\n]*\\]\\(${escapeRegExp(href)}\\)(?: \\((\\d+)\\))?$`,
 		"m",
 	);
 
 	const match = journalContent.match(entryPattern);
 	if (match) {
 		const count = match[2] ? parseInt(match[2], 10) + 1 : 2;
-		return journalContent.replace(entryPattern, `${match[1] ?? ""}Updated AI handoff: ${link} (${count})`);
+		// A replacer function: a string would expand "$1", "$&" and similar patterns in the title.
+		return journalContent.replace(entryPattern, () => `${match[1] ?? ""}Updated AI handoff: ${link} (${count})`);
 	}
 
-	const entry = buildJournalEntry(title, link);
 	const base = journalContent.trim() === "" ? `${journalFrontmatter(options?.date ?? journalRef(new Date()))}\n` : journalContent;
-	const trimmed = base.trimEnd();
-	// Right after a list item the new item continues the list; after anything else a blank line keeps it a separate block.
-	const lastLine = trimmed.split("\n").at(-1) ?? "";
-	const separator = /^\s*[-*+] /.test(lastLine) ? "\n" : "\n\n";
-	return `${trimmed}${separator}${entry}\n`;
+	const eol = base.includes("\r\n") ? "\r\n" : "\n";
+	const withNewline = base.endsWith("\n") ? base : base + eol;
+	const lines = withNewline.replace(/(?:\r?\n)+$/, "").split("\n").map((l) => l.replace(/\r$/, ""));
+	const lastLine = lines.at(-1) ?? "";
+
+	// Handoff lines stay together, in the same list.
+	const previous = lastLine.match(/^([-*+]) (?:Created|Updated) AI handoff: /);
+	if (previous) {
+		return `${withNewline.replace(/(?:\r?\n)+$/, "")}${eol}${buildJournalEntry(title, link, previous[1])}${eol}`;
+	}
+
+	// Any other line gets a blank line first. A blank line alone does not end a list, and a list under a
+	// paragraph (such as Daily TODO) would adopt the entry, so after a list the entry uses another bullet marker.
+	const anchor = [...lines].reverse().find((l) => l.trim() !== "" && !/^\s/.test(l)) ?? "";
+	const listMarker = anchor.match(/^([-*+]) /)?.[1];
+	const marker = listMarker === "-" ? "*" : "-";
+	const gap = /\n\r?\n$/.test(withNewline) ? "" : eol;
+	return `${withNewline}${gap}${buildJournalEntry(title, link, marker)}${eol}`;
 }
 
 /** Escape special regex characters in a string. */

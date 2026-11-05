@@ -17,6 +17,7 @@ import {
 	EXTRACT_SYSTEM_PROMPT_RULES,
 	buildJournalEntry,
 	upsertJournalEntry,
+	updateContextPage,
 	extractCreatedDate,
 	extractJSON,
 	filePathToPageName,
@@ -203,7 +204,7 @@ describe("buildContextPage", () => {
 		const page = buildContextPage(baseParams, { createdDate: "2026-11-05" });
 		assert.ok(
 			page.startsWith(
-				'---\ntype: concept\ntitle: "AI Handoff/Test Context"\ntags: ["ai", "handoff"]\ncreated: "2026-11-05"\n---\n\n',
+				'---\ntype: ai-handoff\ntitle: "AI Handoff/Test Context"\ntags: ["ai", "handoff"]\ncreated: "2026-11-05"\n---\n\n',
 			),
 		);
 	});
@@ -323,6 +324,53 @@ describe("buildJournalEntry", () => {
 	});
 });
 
+describe("updateContextPage", () => {
+	const params: ContextPageParams = { title: "T", goal: "New goal", currentState: "New state", keyDecisions: [], files: [] };
+	const existing = [
+		"---",
+		"type: ai-handoff",
+		'title: "AI Handoff/T"',
+		'tags: ["ai", "handoff", "simgym"]',
+		'project: "[SimGym](/simgym.md)"',
+		'created: "2026-10-01"',
+		'status: "changes-pushed"',
+		"---",
+		"",
+		"Old body",
+		"",
+	].join("\n");
+
+	it("keeps every frontmatter line byte for byte and adds only updated", () => {
+		const page = updateContextPage(existing, params, "2026-11-06")!;
+		const front = existing.split("\n---\n")[0].slice(4);
+		assert.ok(page.startsWith(`---\n${front}\nupdated: "2026-11-06"\n---\n\n**Goal**`));
+		assert.ok(!page.includes("Old body"));
+		assert.ok(page.includes("New state"));
+	});
+
+	it("replaces an existing updated line in place", () => {
+		const page = updateContextPage(existing.replace('status:', 'updated: "2026-10-02"\nstatus:'), params, "2026-11-06")!;
+		assert.ok(page.includes('updated: "2026-11-06"\nstatus: "changes-pushed"'));
+		assert.equal(page.match(/^updated:/gm)?.length, 1);
+	});
+
+	it("adds a missing tag and keeps the others", () => {
+		const page = updateContextPage(existing.replace('["ai", "handoff", "simgym"]', '["simgym"]'), params, "2026-11-06")!;
+		assert.ok(page.includes('tags: ["simgym", "ai", "handoff"]'));
+		const block = updateContextPage(existing.replace('tags: ["ai", "handoff", "simgym"]', "tags:\n  - ai\n  - simgym"), params, "2026-11-06")!;
+		assert.ok(block.includes("tags:\n  - ai\n  - simgym\n  - handoff\nproject:"));
+	});
+
+	it("does not change type, even when it is not ai-handoff", () => {
+		const page = updateContextPage(existing.replace("ai-handoff\n", "concept\n"), params, "2026-11-06")!;
+		assert.ok(page.startsWith("---\ntype: concept\n"));
+	});
+
+	it("returns null without frontmatter", () => {
+		assert.equal(updateContextPage("no frontmatter\n", params, "2026-11-06"), null);
+	});
+});
+
 describe("upsertJournalEntry", () => {
 	const link = "[AI Handoff/My Task](/ai-handoff/my-task.md)";
 
@@ -334,9 +382,37 @@ describe("upsertJournalEntry", () => {
 		);
 	});
 
-	it("appends after a list item without a blank line", () => {
+	it("puts a blank line and another bullet marker before the entry after a list item", () => {
 		const result = upsertJournalEntry("- Did some work\n- Another note\n", "My Task");
-		assert.equal(result, `- Did some work\n- Another note\n- Created AI handoff: ${link}\n`);
+		assert.equal(result, `- Did some work\n- Another note\n\n* Created AI handoff: ${link}\n`);
+	});
+
+	it("keeps the entry out of a list that belongs to a paragraph (Daily TODO)", () => {
+		const journal = "---\ntype: journal\n---\n\n[Daily TODO](/daily-todo.md)\n- Item one\n- Item two";
+		const result = upsertJournalEntry(journal, "My Task");
+		assert.ok(result.endsWith(`- Item two\n\n* Created AI handoff: ${link}\n`));
+	});
+
+	it("keeps handoff lines together, in the same list", () => {
+		const other = "[AI Handoff/Other](/ai-handoff/other.md)";
+		assert.ok(upsertJournalEntry(`- Note\n\n* Created AI handoff: ${other}\n`, "My Task").endsWith(`${other}\n* Created AI handoff: ${link}\n`));
+		assert.ok(upsertJournalEntry(`Note\n\n- Created AI handoff: ${other}\n`, "My Task").endsWith(`${other}\n- Created AI handoff: ${link}\n`));
+	});
+
+	it("bumps the counter of an entry written with another bullet marker", () => {
+		assert.ok(upsertJournalEntry(`- Note\n\n* Created AI handoff: ${link}\n`, "My Task").endsWith(`* Updated AI handoff: ${link} (2)\n`));
+	});
+
+	it("does not expand $ patterns in a title when it bumps the counter", () => {
+		const cost = "[AI Handoff/Cost $1 run $& $$](/ai-handoff/cost-1-run.md)";
+		const result = upsertJournalEntry(`- Created AI handoff: ${cost}\n`, "Cost $1 run $& $$", { pageName: "AI Handoff/Cost $1 run $& $$", href: "/ai-handoff/cost-1-run.md" });
+		assert.equal(result, `- Updated AI handoff: ${cost} (2)\n`);
+	});
+
+	it("keeps the trailing spaces and CRLF of the last line", () => {
+		const result = upsertJournalEntry("- Note  \r\n", "My Task");
+		assert.equal(result, `- Note  \r\n\r\n* Created AI handoff: ${link}\r\n`);
+		assert.ok(upsertJournalEntry("Last line  ", "My Task").startsWith("Last line  \n\n- Created"));
 	});
 
 	it("keeps the entry out of a paragraph that has no blank line after it", () => {

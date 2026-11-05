@@ -54,9 +54,11 @@ describe("handoff written into a bundle", { skip }, () => {
 		if (process.env.SHOW_PAGE) console.log(readFileSync(targetPath, "utf-8"), "\n----\n", journal);
 	});
 
-	it("bumps the counter on the second save without breaking lint", () => {
+	it("bumps the counter on an update the same day without breaking lint", () => {
 		const now = new Date("2026-11-06T11:00:00-05:00");
-		saveHandoff({ ...params, currentState: "Second save." }, { dir: bundle, now });
+		const filePath = `${bundle}/ai-handoff/acceptance-handoff-1-copy.md`;
+		const snapshot = { filePath, title: "Acceptance Handoff 1 (copy)", pageName: "AI Handoff/Acceptance Handoff 1 (copy)", loadedAfterEntryId: null };
+		saveHandoff({ ...params, currentState: "Second save." }, { dir: bundle, snapshot, now });
 		const journal = readFileSync(`${bundle}/journals/2026-11-06.md`, "utf-8");
 		assert.ok(journal.includes("- Updated AI handoff: [AI Handoff/Acceptance Handoff 1 (copy)](/ai-handoff/acceptance-handoff-1-copy.md) (2)\n"));
 		assert.equal(journal.match(/AI handoff/g)?.length, 1);
@@ -68,8 +70,14 @@ describe("handoff written into a bundle", { skip }, () => {
 		writeFileSync(journal, '---\ntype: journal\ntitle: "2026-11-07"\ndate: "2026-11-07"\n---\n\n[Daily TODO](/daily-todo.md)\n- Existing item');
 		saveHandoff({ ...params, title: "Second Page" }, { dir: bundle, now: new Date("2026-11-07T09:00:00-05:00") });
 		const text = readFileSync(journal, "utf-8");
-		assert.ok(text.includes("- Existing item\n- Created AI handoff: [AI Handoff/Second Page](/ai-handoff/second-page.md)\n"));
+		assert.ok(text.includes("- Existing item\n\n* Created AI handoff: [AI Handoff/Second Page](/ai-handoff/second-page.md)\n"));
 		assert.deepEqual(lintFindings(bundle, ["ai-handoff/second-page.md", "journals/2026-11-07.md"]), []);
+		// The judge for finding 4: the handoff line must not become a child of the Daily TODO paragraph.
+		const out = spawnSync("tessela", ["query", bundle, "--page", "journals/2026-11-07", "--text", "AI handoff", "--json"], { encoding: "utf-8" });
+		const blocks = JSON.parse(out.stdout) as { parent: string | null; path_refs: string[] }[];
+		assert.equal(blocks.length, 1);
+		assert.equal(blocks[0].parent, null);
+		assert.ok(!blocks[0].path_refs.includes("daily-todo"));
 	});
 
 	it("updates a loaded handoff in place and keeps its created date", () => {
