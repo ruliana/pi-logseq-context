@@ -24,8 +24,8 @@ const params: ContextPageParams = {
 
 function lintFindings(bundle: string, files: string[]) {
 	// Exit 1 only means errors somewhere in the bundle, so read the JSON, not the exit code.
-	const out = spawnSync("tessela", ["lint", bundle, "--json"], { encoding: "utf-8", maxBuffer: 64 * 1024 * 1024 });
-	const all = JSON.parse(out.stdout) as { rule: string; severity: string; path: string; line: number; message: string }[];
+	const out = spawnSync("tessela", ["lint", bundle, "--json", "--api", "2"], { encoding: "utf-8", maxBuffer: 64 * 1024 * 1024 });
+	const all = JSON.parse(out.stdout).diagnostics as { rule: string; severity: string; path: string; line: number; message: string }[];
 	return all.filter((d) => files.includes(d.path) && d.severity !== "info");
 }
 
@@ -73,8 +73,8 @@ describe("handoff written into a bundle", { skip }, () => {
 		assert.ok(text.includes("- Existing item\n\n* Created AI handoff: [AI Handoff/Second Page](/ai-handoff/second-page.md)\n"));
 		assert.deepEqual(lintFindings(bundle, ["ai-handoff/second-page.md", "journals/2026-11-07.md"]), []);
 		// The judge for finding 4: the handoff line must not become a child of the Daily TODO paragraph.
-		const out = spawnSync("tessela", ["query", bundle, "--page", "journals/2026-11-07", "--text", "AI handoff", "--json"], { encoding: "utf-8" });
-		const blocks = JSON.parse(out.stdout) as { parent: string | null; path_refs: string[] }[];
+		const out = spawnSync("tessela", ["query", bundle, "--page", "journals/2026-11-07", "--text", "AI handoff", "--json", "--api", "2"], { encoding: "utf-8" });
+		const blocks = JSON.parse(out.stdout).hits as { parent: string | null; path_refs: string[] }[];
 		assert.equal(blocks.length, 1);
 		assert.equal(blocks[0].parent, null);
 		assert.ok(!blocks[0].path_refs.includes("daily-todo"));
